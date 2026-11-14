@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kamus Mini — Diagnostik &amp; Inspector</title>
+  <link rel="stylesheet" href="ui-system.css">
+  <link rel="stylesheet" href="lib/katex.min.css">
+  <script src="theme.js"></script>
+  <script src="lib/katex.min.js"></script>
+  <script src="lib/auto-render.min.js"></script>
+  <style>
+    body {
+      background: var(--p-bg);
+      color: var(--p-ink);
+      padding: var(--s-5);
+      line-height: 1.5;
+      font-family: var(--font-sans);
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: var(--s-3);
+      background: var(--p-card);
+      border: 1px solid var(--line);
+      border-radius: var(--r-lg);
+      padding: var(--s-3) var(--s-4);
+      margin-bottom: var(--s-4);
+    }
+    .title {
+      font-size: var(--t-md);
+      font-weight: 600;
+      color: var(--p-ink);
+    }
+    .subtitle {
+      font-size: var(--t-xs);
+      color: var(--p-muted);
+    }
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: var(--s-2);
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: 380px 1fr;
+      gap: var(--s-4);
+    }
+    @media (max-width: 960px) {
+      .grid { grid-template-columns: 1fr; }
+    }
+    .card {
+      background: var(--p-card);
+      border: 1px solid var(--line);
+      border-radius: var(--r-md);
+      padding: var(--s-4);
+    }
+    .card h2 {
+      font-size: var(--t-sm);
+      font-weight: 600;
+      margin-bottom: var(--s-3);
+      color: var(--p-ink);
+      border-bottom: 1px solid var(--line);
+      padding-bottom: var(--s-2);
+    }
+    .meta-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--s-2);
+      margin-bottom: var(--s-3);
+    }
+    .meta-item {
+      background: var(--p-surface);
+      border-radius: var(--r-sm);
+      padding: var(--s-2);
+      font-size: var(--t-xs);
+    }
+    .meta-label {
+      color: var(--p-muted);
+      display: block;
+      margin-bottom: 2px;
+      font-size: 11px;
+    }
+    .meta-val {
+      font-weight: 600;
+      color: var(--p-ink);
+      word-break: break-word;
+    }
+    .alert {
+      padding: var(--s-2) var(--s-3);
+      border-radius: var(--r-btn);
+      font-size: var(--t-xs);
+      margin-bottom: var(--s-3);
+      display: none;
+      border-left: 3px solid var(--p-action);
+      background: var(--p-surface);
+      color: var(--p-ink);
+    }
+    .alert-error {
+      border-left-color: var(--p-error);
+      color: var(--p-error);
+    }
+    .alert-warn {
+      border-left-color: var(--p-warn);
+      color: var(--p-warn);
+    }
+    .alert-ok {
+      border-left-color: var(--p-ok);
+      color: var(--p-ok);
+    }
+    .preview-box {
+      background: var(--p-surface);
+      border: 1px dashed var(--line-strong);
+      border-radius: var(--r-btn);
+      padding: var(--s-2);
+      text-align: center;
+      min-height: 160px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .preview-box img {
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+      background: #fff;
+    }
+    .empty-note {
+      font-size: var(--t-xs);
+      color: var(--p-muted);
+    }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--s-1);
+      margin-bottom: var(--s-3);
+    }
+    .pill {
+      padding: 4px 10px;
+      border-radius: var(--r-pill);
+      font-size: var(--t-xs);
+      font-weight: 500;
+      border: 1px solid var(--line);
+      background: var(--p-surface);
+      color: var(--p-muted);
+      cursor: pointer;
+      transition: background-color var(--m-out) var(--ease),
+                  color var(--m-out) var(--ease);
+    }
+    .pill:hover {
+      color: var(--p-ink);
+    }
+    .pill.active {
+      background: var(--p-action);
+      border-color: var(--p-action);
+      color: var(--p-action-ink);
+    }
+    .log-list {
+      max-height: 70vh;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: var(--s-2);
+      font-family: var(--font-mono);
+      font-size: 11.5px;
+    }
+    .log-entry {
+      background: var(--p-surface);
+      border-left: 3px solid var(--p-action);
+      border-radius: var(--r-sm);
+      padding: var(--s-2) var(--s-3);
+    }
+    .log-entry.level-ERROR {
+      border-left-color: var(--p-error);
+    }
+    .log-entry.level-WARN {
+      border-left-color: var(--p-warn);
+    }
+    .log-entry.level-SUCCESS {
+      border-left-color: var(--p-ok);
+    }
+    .log-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: var(--s-1);
+      font-size: 11px;
+      margin-bottom: 3px;
+    }
+    .tag {
+      padding: 1px 6px;
+      border-radius: 4px;
+      background: var(--p-card);
+      border: 1px solid var(--line);
+      color: var(--p-ink);
+      font-weight: 600;
+    }
+    .tag-level-ERROR { color: var(--p-error); }
+    .tag-level-WARN { color: var(--p-warn); }
+    .tag-level-SUCCESS { color: var(--p-ok); }
+    .log-msg { color: var(--p-ink); word-break: break-word; }
+    .log-data {
+      margin-top: var(--s-1);
+      background: var(--p-card);
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      padding: var(--s-2);
+      color: var(--p-muted);
+      font-size: 11px;
+      font-family: var(--font-mono);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 220px;
+      overflow-y: auto;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="topbar">
+      <div>
+        <div class="title">Diagnostik &amp; Inspector Kamus Mini</div>
+        <div class="subtitle">Inspeksi tangkapan gambar, ekstraksi OCR, payload jaringan, dan alur pengerjaan kuis.</div>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="icon-btn" id="btnThemeToggle" aria-label="Ganti Tema" title="Ganti Tema">
+          <svg id="themeIcon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="5"></circle><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path></svg>
+        </button>
+        <button type="button" class="btn btn--primary btn--sm" id="btnCopyAll">Salin Laporan</button>
+        <button type="button" class="btn btn--secondary btn--sm" id="btnDownloadTxt">Unduh .txt</button>
+        <button type="button" class="btn btn--secondary btn--sm" id="btnRefresh">Refresh</button>
+        <button type="button" class="btn btn--secondary btn--sm" id="btnClearAll">Bersihkan Log</button>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>Screenshot Terakhir</h2>
+        <div class="alert" id="captureAlert"></div>
+        <div class="meta-grid" id="captureMeta">
+          <div class="meta-item"><span class="meta-label">Status</span><span class="meta-val">Belum ada</span></div>
+          <div class="meta-item"><span class="meta-label">Dimensi</span><span class="meta-val">-</span></div>
+          <div class="meta-item"><span class="meta-label">Ukuran / Slice</span><span class="meta-val">-</span></div>
+          <div class="meta-item"><span class="meta-label">Piksel Non-Putih</span><span class="meta-val">-</span></div>
+        </div>
+        <div class="preview-box" id="previewBox">
+          <span class="empty-note">Belum ada gambar yang ditangkap.</span>
+        </div>
+        <div style="margin-top:10px; font-size:11px; color:var(--p-muted);" id="captureExtra"></div>
+        <div id="ocrPreviewSection" style="display:none; margin-top:14px; border-top:1px solid var(--line); padding-top:12px;">
+          <h3 style="font-size:12px; color:var(--p-ink); margin-bottom:6px;">Hasil PaddleOCR (<span id="ocrModeBadge">-</span>)</h3>
+          <div id="ocrDiagramThumbs" style="display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px;"></div>
+          <pre class="log-data" id="ocrMarkdownBox" style="max-height:180px;"></pre>
+        </div>
+
+        <div id="aiReasoningSection" style="display:none; margin-top:14px; border-top:1px solid var(--line); padding-top:12px;">
+          <h3 style="font-size:12px; color:var(--p-ink); margin-bottom:6px; display:flex; justify-content:space-between; align-items:center;">
+            <span>Penalaran Matematika &amp; Jawaban AI</span>
+            <span id="aiReasoningBadge" class="pill" style="font-size:10px; padding:2px 8px;">AI</span>
+          </h3>
+          <div id="aiAnswerBanner" style="font-size:12px; font-weight:600; color:var(--p-action); margin-bottom:8px; padding:6px 10px; background:var(--p-surface); border-radius:var(--r-sm); border:1px solid var(--line);"></div>
+          <div id="aiReasoningBox" style="font-size:12px; line-height:1.6; color:var(--p-ink); background:var(--p-surface); border:1px solid var(--line); border-radius:var(--r-sm); padding:10px; max-height:260px; overflow-y:auto; word-break:break-word;"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Timeline Log Terstruktur (<span id="logCount">0</span>)</h2>
+        <div class="filters" id="filterBar">
+          <button type="button" class="pill active" data-filter="ALL">Semua</button>
+          <button type="button" class="pill" data-filter="CAPTURE">Capture</button>
+          <button type="button" class="pill" data-filter="OCR">OCR</button>
+          <button type="button" class="pill" data-filter="AI">AI</button>
+          <button type="button" class="pill" data-filter="WARN_ERROR">Warn / Error</button>
+        </div>
+        <div class="log-list" id="logList">
+          <div class="empty-note">Belum ada catatan diagnostik.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script src="logs.js"></script>
+</body>
+</html>

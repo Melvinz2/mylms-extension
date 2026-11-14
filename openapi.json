@@ -1,0 +1,792 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "AI Agent Exam API",
+    "version": "1.0.0",
+    "description": "API khusus untuk manajemen bank soal oleh AI Agent."
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key"
+      }
+    },
+    "schemas": {
+      "ExamListResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "ExamDetailResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "nullable": true
+          }
+        },
+        "required": [
+          "success"
+        ]
+      },
+      "ExamQuestionsListResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "nullable": true
+            }
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      },
+      "SearchAnswerResponse": {
+        "type": "object",
+        "properties": {
+          "matchScore": {
+            "type": "number",
+            "example": 0.95
+          },
+          "answer": {
+            "type": "string",
+            "example": "Isaac Newton"
+          }
+        },
+        "required": [
+          "matchScore",
+          "answer"
+        ]
+      },
+      "SearchAnswerRequest": {
+        "type": "object",
+        "properties": {
+          "questionText": {
+            "type": "string",
+            "example": "Siapa penemu gaya gravitasi?"
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "example": [
+              "A. Albert Einstein",
+              "B. Isaac Newton"
+            ]
+          }
+        },
+        "required": [
+          "questionText"
+        ]
+      },
+      "SearchAnswerImageResponse": {
+        "type": "object",
+        "properties": {
+          "matchScore": {
+            "type": "number"
+          },
+          "answer": {
+            "type": "string"
+          },
+          "ocrText": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "matchScore",
+          "answer",
+          "ocrText"
+        ]
+      },
+      "SearchAnswerImageRequest": {
+        "type": "object",
+        "properties": {
+          "image": {
+            "type": "string",
+            "format": "binary"
+          }
+        },
+        "required": [
+          "image"
+        ]
+      },
+      "BulkProcessResponse": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "jobId": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "message",
+          "jobId"
+        ]
+      },
+      "BulkProcessRequest": {
+        "type": "object",
+        "properties": {
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "example": "1 + 1 = ?"
+                },
+                "rawOptions": {
+                  "type": "string",
+                  "example": "A. 1\nB. 2\nC. 3\nD. 4"
+                }
+              },
+              "required": [
+                "text",
+                "rawOptions"
+              ]
+            }
+          }
+        },
+        "required": [
+          "questions"
+        ]
+      },
+      "JobStatusResponse": {
+        "type": "object",
+        "properties": {
+          "jobId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "progress": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "jobId",
+          "status",
+          "progress"
+        ]
+      },
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "AgentExamQuestionsResponse": {
+        "type": "object",
+        "properties": {
+          "examId": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "questions": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "questionText": {
+                  "type": "string"
+                },
+                "imageUrl": {
+                  "type": "string",
+                  "nullable": true
+                },
+                "options": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "optionText": {
+                        "type": "string"
+                      },
+                      "isCorrect": {
+                        "type": "boolean"
+                      },
+                      "imageUrl": {
+                        "type": "string",
+                        "nullable": true
+                      }
+                    },
+                    "required": [
+                      "optionText",
+                      "isCorrect"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "id",
+                "questionText",
+                "options"
+              ]
+            }
+          }
+        },
+        "required": [
+          "examId",
+          "title",
+          "questions"
+        ]
+      },
+      "AddQuestionResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "message": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "id"
+            ]
+          }
+        },
+        "required": [
+          "success",
+          "message",
+          "data"
+        ]
+      },
+      "AddQuestionRequest": {
+        "type": "object",
+        "properties": {
+          "categoryId": {
+            "type": "string",
+            "example": "d5351f7d-81db-40a1-a796-0be6014e3650"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "MULTIPLE_CHOICE",
+              "ESSAY",
+              "TRUE_FALSE"
+            ],
+            "example": "MULTIPLE_CHOICE"
+          },
+          "questionText": {
+            "type": "string",
+            "example": "Ibukota Indonesia adalah?"
+          },
+          "imageBase64": {
+            "type": "string",
+            "example": "iVBORw0KGgoAAA..."
+          },
+          "options": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "optionText": {
+                  "type": "string",
+                  "example": "Jakarta"
+                },
+                "isCorrect": {
+                  "type": "boolean",
+                  "example": true
+                },
+                "imageBase64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "optionText",
+                "isCorrect"
+              ]
+            }
+          }
+        },
+        "required": [
+          "categoryId",
+          "type",
+          "questionText",
+          "options"
+        ]
+      },
+      "CategoriesListResponse": {
+        "type": "object",
+        "properties": {
+          "success": {
+            "type": "boolean"
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "slug": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "id",
+                "name",
+                "slug"
+              ]
+            }
+          }
+        },
+        "required": [
+          "success",
+          "data"
+        ]
+      }
+    },
+    "parameters": {
+
+    }
+  },
+  "paths": {
+    "/api/v1/exams": {
+      "get": {
+        "tags": [
+          "Core Exams"
+        ],
+        "summary": "Get List of Exams",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "UTS",
+                "UAS",
+                "GENERAL"
+              ]
+            },
+            "required": false,
+            "name": "type",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "KELAS_10",
+                "KELAS_11",
+                "KELAS_12"
+              ]
+            },
+            "required": false,
+            "name": "grade",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of Exams",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExamListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/exams/{id}": {
+      "get": {
+        "tags": [
+          "Core Exams"
+        ],
+        "summary": "Get Exam Detail",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exam details",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExamDetailResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found"
+          }
+        }
+      }
+    },
+    "/api/v1/exams/{id}/questions": {
+      "get": {
+        "tags": [
+          "Core Exams"
+        ],
+        "summary": "Get Exam Questions",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exam Questions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExamQuestionsListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/search-answer": {
+      "post": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Fast Answer Search via Redis",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchAnswerRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchAnswerResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/search-answer-image": {
+      "post": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Search Answer via Screenshot (OCR)",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchAnswerImageRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search Result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchAnswerImageResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "matchScore": {
+                      "type": "number"
+                    },
+                    "answer": {
+                      "type": "string"
+                    },
+                    "ocrText": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "matchScore",
+                    "answer",
+                    "ocrText"
+                  ]
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "OCR Error"
+          }
+        }
+      }
+    },
+    "/api/v1/agent/bulk-process": {
+      "post": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Trigger Bulk Question Extraction",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkProcessRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Background Job Accepted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkProcessResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/job-status/{jobId}": {
+      "get": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Check Background Job Status",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "jobId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job Status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobStatusResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Job Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/exams/{examId}/questions": {
+      "get": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Get Extracted Exam Output",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "schema": {
+              "type": "string"
+            },
+            "required": true,
+            "name": "examId",
+            "in": "path"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Exam Extracted Data",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentExamQuestionsResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Exam Not Found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/questions": {
+      "post": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Add Single Question Synchronously",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddQuestionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Question created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AddQuestionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/agent/categories": {
+      "get": {
+        "tags": [
+          "AI Agent"
+        ],
+        "summary": "Get All Categories",
+        "security": [
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Categories List",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CategoriesListResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

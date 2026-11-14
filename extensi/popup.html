@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kamus Mini</title>
+  <link rel="stylesheet" href="ui-system.css">
+  <script src="theme.js"></script>
+  <style>
+    body {
+      width: 296px;
+      padding: var(--s-4);
+      background: var(--p-bg);
+      color: var(--p-ink);
+      overflow-x: hidden;
+      user-select: none;
+    }
+
+    /* Header */
+    .popup-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: var(--s-3);
+    }
+
+    .popup-brand {
+      display: flex;
+      flex-direction: column;
+      gap: 1px;
+    }
+
+    .popup-title {
+      font-size: var(--t-md);
+      font-weight: 600;
+      letter-spacing: -0.01em;
+      color: var(--p-ink);
+      line-height: 1.2;
+    }
+
+    .popup-subtitle {
+      font-size: var(--t-xs);
+      color: var(--p-muted);
+      font-weight: 500;
+    }
+
+    .header-actions {
+      display: flex;
+      align-items: center;
+      gap: var(--s-1);
+    }
+
+    /* Status Card */
+    .status-card {
+      display: flex;
+      align-items: center;
+      gap: var(--s-2);
+      padding: var(--s-2) var(--s-3);
+      background: var(--p-card);
+      border: 1px solid var(--line);
+      border-radius: var(--r-btn);
+      margin-bottom: var(--s-3);
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--p-muted);
+      flex: none;
+      transition: background-color var(--m-in) var(--ease);
+    }
+
+    .status-dot.running {
+      background: var(--p-action);
+      box-shadow: 0 0 0 3px color-mix(in oklab, var(--p-action) 25%, transparent);
+    }
+
+    .status-dot.paused {
+      background: var(--p-warn);
+    }
+
+    .status-dot.completed {
+      background: var(--p-ok);
+    }
+
+    .status-text {
+      font-size: var(--t-xs);
+      font-weight: 500;
+      color: var(--p-ink);
+      flex: 1;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* Controls */
+    .control-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: var(--s-3);
+    }
+
+    .control-label {
+      font-size: var(--t-xs);
+      font-weight: 500;
+      color: var(--p-muted);
+    }
+
+    .action-container {
+      margin-bottom: var(--s-3);
+    }
+
+    /* Quick Search Accordion */
+    .quick-search {
+      border: 1px solid var(--line);
+      border-radius: var(--r-btn);
+      background: var(--p-card);
+      overflow: hidden;
+    }
+
+    .quick-search-summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: var(--s-2) var(--s-3);
+      font-size: var(--t-xs);
+      font-weight: 500;
+      color: var(--p-muted);
+      cursor: pointer;
+      list-style: none;
+      transition: color var(--m-out) var(--ease);
+    }
+
+    .quick-search-summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .quick-search-summary:hover {
+      color: var(--p-ink);
+    }
+
+    .quick-search-summary svg {
+      transition: transform var(--m-out) var(--ease);
+    }
+
+    .quick-search[open] .quick-search-summary svg {
+      transform: rotate(180deg);
+    }
+
+    .quick-search-body {
+      padding: 0 var(--s-3) var(--s-3) var(--s-3);
+      border-top: 1px solid var(--line);
+      margin-top: 2px;
+      padding-top: var(--s-2);
+    }
+
+    .manual-result {
+      margin-top: var(--s-2);
+      padding: var(--s-2);
+      font-size: var(--t-xs);
+      border-radius: var(--r-sm);
+      background: var(--p-surface);
+      color: var(--p-ink);
+      max-height: 110px;
+      overflow-y: auto;
+      line-height: 1.4;
+      word-break: break-word;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="popup-header">
+    <div class="popup-brand">
+      <h1 class="popup-title">Kamus Mini</h1>
+      <span id="engineInfo" class="popup-subtitle">Memuat...</span>
+    </div>
+    <div class="header-actions">
+      <button type="button" id="btnThemeToggle" class="icon-btn" aria-label="Ganti Tema" title="Ganti Tema">
+        <!-- SVG will be injected by popup.js -->
+        <svg id="themeIcon" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="5"></circle>
+          <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+        </svg>
+      </button>
+      <button type="button" id="btnOpenOptions" class="icon-btn" aria-label="Pengaturan" title="Pengaturan">
+        <svg viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- Status Chip -->
+  <div class="status-card">
+    <span id="statusBadge" class="status-dot"></span>
+    <span id="statusLabel" class="status-text tabular">Siap</span>
+  </div>
+
+  <!-- Navigation Mode -->
+  <div class="control-row">
+    <span class="control-label">Mode Navigasi</span>
+    <div class="segmented" id="segNavMode" role="radiogroup" aria-label="Mode Navigasi">
+      <button type="button" id="btnModeSemi" class="segmented__btn active" role="radio" aria-checked="true" data-mode="semi_auto">Semi</button>
+      <button type="button" id="btnModeAuto" class="segmented__btn" role="radio" aria-checked="false" data-mode="full_auto">Auto</button>
+    </div>
+    <!-- Hidden element kept for compatibility with existing content scripts -->
+    <input type="checkbox" id="chkAutoNext" style="display:none;" tabindex="-1">
+    <span id="autoNextLabel" style="display:none;"></span>
+  </div>
+
+  <!-- Action Button -->
+  <div class="action-container">
+    <button type="button" id="btnStartAgent" class="btn btn--primary btn--full">Mulai</button>
+    <button type="button" id="btnStopAgent" class="btn btn--secondary btn--full" style="display:none;">Hentikan</button>
+  </div>
+
+  <!-- Collapsed Quick Search -->
+  <details class="quick-search">
+    <summary class="quick-search-summary">
+      <span>Cari Cepat</span>
+      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 6l4 4 4-4"/>
+      </svg>
+    </summary>
+    <div class="quick-search-body">
+      <div class="field">
+        <input type="text" id="manualQuery" placeholder="Ketik kata kunci...">
+      </div>
+      <button type="button" id="btnManualSearch" class="btn btn--secondary btn--sm btn--full" style="margin-top: var(--s-2);">Cari</button>
+      <div id="manualResult" class="manual-result" style="display:none;"></div>
+    </div>
+  </details>
+
+  <script src="popup.js"></script>
+</body>
+</html>

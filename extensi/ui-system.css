@@ -1,0 +1,386 @@
+/* ui-system.css - Kamus Mini Design System (design-taste-frontend aligned) */
+/* Palettes: cool-white-slate (Light) and green-black-bone (Dark) */
+
+:root {
+  /* Light Theme (cool-white-slate) */
+  --p-bg: #f7f9fa;
+  --p-surface: #ecf0f2;
+  --p-card: #ffffff;
+  --p-ink: #1f3038;
+  --p-muted: #5d6b72;
+  --p-action: #0d7480;
+  --p-action-ink: #ffffff;
+  --p-ok: #0f7d45;
+  --p-error: #c5221f;
+  --p-warn: #b45309;
+  --line: color-mix(in oklab, var(--p-ink) 11%, transparent);
+  --line-strong: color-mix(in oklab, var(--p-ink) 22%, transparent);
+  --p-shadow: 0 1px 2px rgba(0,0,0,0.04), 0 4px 12px rgba(0,0,0,0.03);
+
+  /* Spacing Scale (4/8 rhythm) */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+
+  /* Radius Scale */
+  --r-sm: 6px;
+  --r-md: 10px;
+  --r-lg: 14px;
+  --r-btn: 8px;
+  --r-pill: 999px;
+
+  /* Typography */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Segoe UI Mono", Menlo, Consolas, monospace;
+  --t-xs: 11.5px;
+  --t-sm: 13px;
+  --t-base: 14px;
+  --t-md: 15px;
+  --t-lg: 18px;
+
+  /* Motion */
+  --ease: cubic-bezier(.2, .8, .2, 1);
+  --ease-slide: cubic-bezier(.65, 0, .35, 1);
+  --m-in: 150ms;
+  --m-out: 120ms;
+  --m-press: 90ms;
+  --m-slide: 240ms;
+
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  /* Dark Theme (green-black-bone) */
+  --p-bg: #161c1a;
+  --p-surface: #1f2725;
+  --p-card: #1f2725;
+  --p-ink: #e3e2da;
+  --p-muted: #8e948d;
+  --p-action: #9fc7b8;
+  --p-action-ink: #161c1a;
+  --p-ok: #7fd4a8;
+  --p-error: #f08e84;
+  --p-warn: #f6c445;
+  --line: color-mix(in oklab, var(--p-ink) 12%, transparent);
+  --line-strong: color-mix(in oklab, var(--p-ink) 24%, transparent);
+  --p-shadow: 0 1px 2px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.2);
+
+  color-scheme: dark;
+}
+
+/* Fallback for system preference when data-theme is not explicitly set */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    --p-bg: #161c1a;
+    --p-surface: #1f2725;
+    --p-card: #1f2725;
+    --p-ink: #e3e2da;
+    --p-muted: #8e948d;
+    --p-action: #9fc7b8;
+    --p-action-ink: #161c1a;
+    --p-ok: #7fd4a8;
+    --p-error: #f08e84;
+    --p-warn: #f6c445;
+    --line: color-mix(in oklab, var(--p-ink) 12%, transparent);
+    --line-strong: color-mix(in oklab, var(--p-ink) 24%, transparent);
+    --p-shadow: 0 1px 2px rgba(0,0,0,0.25), 0 4px 12px rgba(0,0,0,0.2);
+    color-scheme: dark;
+  }
+}
+
+/* Base Reset */
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--p-bg);
+  color: var(--p-ink);
+  font-family: var(--font-sans);
+  font-size: var(--t-sm);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Focus Visibility */
+:focus-visible {
+  outline: 2px solid var(--p-action);
+  outline-offset: 2px;
+}
+
+/* Common Typography & Layout */
+h1, h2, h3, h4, p {
+  margin: 0;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Icon Buttons */
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: var(--r-btn);
+  border: 1px solid var(--line);
+  background: var(--p-card);
+  color: var(--p-muted);
+  cursor: pointer;
+  transition: background-color var(--m-out) var(--ease),
+              border-color var(--m-out) var(--ease),
+              color var(--m-out) var(--ease),
+              transform var(--m-press) var(--ease);
+}
+
+.icon-btn:hover {
+  background: var(--p-surface);
+  border-color: var(--line-strong);
+  color: var(--p-ink);
+}
+
+.icon-btn:active {
+  transform: translateY(1px) scale(0.98);
+}
+
+.icon-btn svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* Standard Buttons */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  height: 38px;
+  padding: 0 var(--s-4);
+  font-family: var(--font-sans);
+  font-size: var(--t-sm);
+  font-weight: 500;
+  border-radius: var(--r-btn);
+  border: 1px solid transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background-color var(--m-out) var(--ease),
+              border-color var(--m-out) var(--ease),
+              color var(--m-out) var(--ease),
+              transform var(--m-press) var(--ease);
+}
+
+.btn:active {
+  transform: translateY(1px) scale(0.985);
+}
+
+.btn--primary {
+  background: var(--p-action);
+  color: var(--p-action-ink);
+  border-color: var(--p-action);
+}
+
+.btn--primary:hover {
+  background: color-mix(in oklab, var(--p-action) 88%, var(--p-ink));
+  border-color: color-mix(in oklab, var(--p-action) 88%, var(--p-ink));
+}
+
+.btn--secondary {
+  background: var(--p-card);
+  color: var(--p-ink);
+  border-color: var(--line-strong);
+}
+
+.btn--secondary:hover {
+  background: var(--p-surface);
+  border-color: color-mix(in oklab, var(--p-ink) 35%, transparent);
+}
+
+.btn--full {
+  width: 100%;
+}
+
+.btn--sm {
+  height: 32px;
+  padding: 0 var(--s-3);
+  font-size: var(--t-xs);
+}
+
+/* Segmented Control */
+.segmented {
+  display: inline-flex;
+  align-items: center;
+  background: var(--p-surface);
+  padding: 2px;
+  border-radius: var(--r-btn);
+  border: 1px solid var(--line);
+}
+
+.segmented__btn {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: var(--p-muted);
+  font-family: var(--font-sans);
+  font-size: var(--t-xs);
+  font-weight: 500;
+  padding: 4px 10px;
+  border-radius: calc(var(--r-btn) - 2px);
+  cursor: pointer;
+  transition: color var(--m-out) var(--ease),
+              background-color var(--m-out) var(--ease);
+}
+
+.segmented__btn:hover {
+  color: var(--p-ink);
+}
+
+.segmented__btn[aria-checked="true"],
+.segmented__btn.active {
+  background: var(--p-card);
+  color: var(--p-ink);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+}
+
+/* Custom Toggle Switch (.m-switch) */
+.m-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 24px;
+  flex: none;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  background: color-mix(in oklab, var(--p-ink) 25%, var(--p-surface));
+  transition: background-color var(--m-in) var(--ease);
+}
+
+.m-switch::before {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 3px;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-pill);
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  transform-origin: 0 50%;
+  transition: transform var(--m-in) var(--ease);
+}
+
+.m-switch[aria-checked="true"] {
+  background: var(--p-action);
+}
+
+.m-switch[aria-checked="true"]::before {
+  transform: translateX(16px);
+  background: var(--p-action-ink);
+}
+
+.m-switch:active::before {
+  transform: scaleX(1.22);
+  transition-duration: var(--m-press);
+}
+
+.m-switch[aria-checked="true"]:active::before {
+  transform: translateX(12px) scaleX(1.22);
+}
+
+/* Form Fields */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.field label {
+  font-size: var(--t-xs);
+  font-weight: 500;
+  color: var(--p-muted);
+}
+
+.field input[type="text"],
+.field input[type="password"],
+.field input[type="number"],
+.field select,
+.field textarea {
+  width: 100%;
+  height: 38px;
+  padding: 0 var(--s-3);
+  font-family: var(--font-sans);
+  font-size: var(--t-sm);
+  color: var(--p-ink);
+  background: var(--p-card);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-btn);
+  transition: border-color var(--m-out) var(--ease),
+              box-shadow var(--m-out) var(--ease);
+}
+
+.field textarea {
+  height: auto;
+  min-height: 80px;
+  padding: var(--s-2) var(--s-3);
+  resize: vertical;
+}
+
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  outline: none;
+  border-color: var(--p-action);
+  box-shadow: 0 0 0 1px var(--p-action);
+}
+
+/* Card */
+.card {
+  background: var(--p-card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+}
+
+/* Banner / Status Notice */
+.notice {
+  font-size: var(--t-xs);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-btn);
+  border-left: 3px solid var(--p-action);
+  background: var(--p-surface);
+  color: var(--p-ink);
+}
+
+.notice--error {
+  border-left-color: var(--p-error);
+  color: var(--p-error);
+}
+
+.notice--ok {
+  border-left-color: var(--p-ok);
+  color: var(--p-ok);
+}
+
+/* Reduced Motion Override */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition-duration: 0ms !important;
+    animation-duration: 0ms !important;
+    transform: none !important;
+  }
+}
+

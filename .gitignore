@@ -1,0 +1,31 @@
+# Environment variables, credentials & secrets
+.env
+.env.*
+*.env
+credential.env
+
+# Playwright, browser profiles & temporary test caches
+playwright_profile/
+*.png
+*.jpg
+*.jpeg
+*.log
+npm-debug.log*
+yarn-debug.log*
+
+# Local Backups & Scratch
+extensi_backup_pre_ocr/
+Cuplikan layar*
+example.md
+
+# Agent Skill / Tooling folders
+.agents/
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Local Archive Server Data
+pywb_data/
