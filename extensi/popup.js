@@ -192,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
     manualResult.style.display = 'block';
     manualResult.textContent = 'Mencari...';
 
-    const config = await new Promise(r => chrome.storage.local.get(['solverEngine', 'aiProvider', 'aiApiKey', 'aiModel', 'apiKey'], r));
+    const config = await new Promise(r => chrome.storage.local.get(['solverEngine', 'aiProvider', 'aiApiKey', 'aiModel', 'apiKey', 'selectedModelId'], r));
     const engine = config.solverEngine || 'direct_ai';
 
     try {
@@ -222,15 +222,13 @@ document.addEventListener('DOMContentLoaded', () => {
           manualResult.textContent = 'Gunakan Gemini untuk hasil terbaik pada pencarian cepat.';
         }
       } else {
-        const baseUrl = 'https://mylms.melvino.online';
-        const headers = { 'Content-Type': 'application/json' };
-        if (config.apiKey) headers['x-api-key'] = config.apiKey;
-        const res = await fetch(`${baseUrl}/api/search`, {
-          method: 'POST',
-          headers,
-          body: JSON.stringify({ query: query })
+        const { body: data, limit } = await KamusMiniCloud.searchAnswer(config.apiKey, {
+          query, modelId: config.selectedModelId || null
         });
-        const data = await res.json();
+        if (limit) {
+          manualResult.textContent = `AI dilimit (${limit.reasonCode}). Coba lagi dalam ${limit.retryAfterSeconds} detik.`;
+          return;
+        }
         manualResult.textContent = data.jawaban || data.answer || 'Tidak ditemukan di database.';
       }
     } catch (err) {

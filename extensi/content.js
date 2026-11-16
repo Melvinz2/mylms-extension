@@ -359,16 +359,11 @@ async function fetchAnswer(query) {
   }
 
   try {
-    const cfg = await new Promise(r => chrome.storage.local.get(['apiKey'], r));
-    const headers = { 'Content-Type': 'application/json' };
-    if (cfg.apiKey) headers['x-api-key'] = cfg.apiKey;
-
-    const res = await safeFetch(`${KAMUS_MINI_CLOUD_URL}/api/search`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ query: query.trim() })
+    const cfg = await new Promise(r => chrome.storage.local.get(['apiKey', 'selectedModelId'], r));
+    const { body: data, limit } = await KamusMiniCloud.searchAnswer(cfg.apiKey, {
+      query: query.trim(), modelId: cfg.selectedModelId || null
     });
-    const data = await res.json();
+    if (limit) { showToast('', `AI dilimit: ${limit.message}`, 'error'); return; }
     const answerText = data.jawaban || data.answer || '';
     if ((data.success !== false) && answerText) {
       showToast('', answerText, 'info');
@@ -2685,7 +2680,8 @@ async function solveQuestionFlow(qNum, doc) {
     'paddleOcrJobUrl',
     'apiKey',
     'baseUrl',
-    'matchThreshold'
+    'matchThreshold',
+    'selectedModelId'
   ], r));
 
   const engine = config.solverEngine || 'direct_ai';
@@ -2744,23 +2740,19 @@ async function solveQuestionFlow(qNum, doc) {
   // ==========================================
   try {
     logAgentActivity(`[Soal ${qNum}] Attempt 1: Fast Text Search (${baseUrl})...`);
-    const response = await safeFetch(`${baseUrl}/api/v1/agent/search-answer`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey
-      },
-      body: JSON.stringify({ questionText: questionText, options: null })
+    const { res, body: data, limit } = await KamusMiniCloud.searchAnswer(apiKey, {
+      questionText: questionText,
+      options: null, // Attempt 1: teks soal saja
+      modelId: config.selectedModelId || null
     });
-    
-    if (response.ok) {
-      const data = await response.json();
-      if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
-        const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
-        if (match.success) {
-          logAgentActivity(`[Soal ${qNum}] Attempt 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
-          return { success: true, mode: 'Cloud Fast Text', score: data.matchScore };
-        }
+    if (limit) {
+      logAgentActivity(`[Soal ${qNum}] AI dilimit (${limit.reasonCode}). Tunggu ${limit.retryAfterSeconds}s. DB lookup tetap jalan untuk soal ini.`);
+    }
+    if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
+      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
+      if (match.success) {
+        logAgentActivity(`[Soal ${qNum}] Attempt 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+        return { success: true, mode: 'Cloud Fast Text', score: data.matchScore };
       }
     }
   } catch (err) {
@@ -2772,23 +2764,19 @@ async function solveQuestionFlow(qNum, doc) {
   // ==========================================
   try {
     logAgentActivity(`[Soal ${qNum}] Attempt 1 Gagal/Skor Rendah. Mencoba Fallback 1 (Soal + Opsi)...`);
-    const response = await safeFetch(`${baseUrl}/api/v1/agent/search-answer`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey
-      },
-      body: JSON.stringify({ questionText: questionText, options: options })
+    const { res, body: data, limit } = await KamusMiniCloud.searchAnswer(apiKey, {
+      questionText: questionText,
+      options: options,
+      modelId: config.selectedModelId || null
     });
-    
-    if (response.ok) {
-      const data = await response.json();
-      if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
-        const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
-        if (match.success) {
-          logAgentActivity(`[Soal ${qNum}] Fallback 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
-          return { success: true, mode: 'Cloud Refined Text', score: data.matchScore };
-        }
+    if (limit) {
+      logAgentActivity(`[Soal ${qNum}] AI dilimit (${limit.reasonCode}). Tunggu ${limit.retryAfterSeconds}s. DB lookup tetap jalan untuk soal ini.`);
+    }
+    if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
+      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
+      if (match.success) {
+        logAgentActivity(`[Soal ${qNum}] Fallback 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+        return { success: true, mode: 'Cloud Refined Text', score: data.matchScore };
       }
     }
   } catch (err) {
@@ -2811,44 +2799,14 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc) {
       throw new Error("Gagal memotong tangkapan layar elemen");
     }
 
-    const endpoint = `${baseUrl}/api/v1/agent/search-answer-image`;
-    let data = null;
-
-    try {
-      const formData = new FormData();
-      formData.append('image', imageBlob, `question_${qNum}.png`);
-
-      const response = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'x-api-key': apiKey },
-        body: formData
-      });
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`API returned status ${response.status}: ${errText}`);
-      }
-      data = await response.json();
-    } catch (directErr) {
-      // Fallback via background.js multipart proxy jika CSP/CORS memblokir tab fetch
-      const base64Img = await blobToBase64(imageBlob);
-      const proxyResp = await new Promise((resolve, reject) => {
-        chrome.runtime.sendMessage({
-          action: 'proxyFetch',
-          url: endpoint,
-          options: { method: 'POST', headers: { 'x-api-key': apiKey } },
-          multipart: {
-            files: [{ field: 'image', filename: `question_${qNum}.png`, mimeType: 'image/png', base64: base64Img }]
-          }
-        }, (resp) => {
-          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-          if (!resp || !resp.success) return reject(new Error(resp?.error || directErr.message));
-          resolve(resp);
-        });
-      });
-      if (!proxyResp.ok) {
-        throw new Error(`API returned status ${proxyResp.status}: ${String(proxyResp.data || '').slice(0, 200)}`);
-      }
-      data = JSON.parse(proxyResp.data);
+    // `config` (dari solveQuestionFlow) tidak berada di scope fungsi ini —
+    // ambil preferensi model langsung dari storage.
+    const modelCfg = await new Promise(r => chrome.storage.local.get(['selectedModelId'], r));
+    const { res, body: data, limit } = await KamusMiniCloud.searchAnswerImage(apiKey, {
+      imageBlob, filename: `question_${qNum}.png`, modelId: modelCfg.selectedModelId || null
+    });
+    if (limit) {
+      logAgentActivity(`[Soal ${qNum}] AI dilimit (${limit.reasonCode}). Tunggu ${limit.retryAfterSeconds}s.`);
     }
 
     if (data && (data.answer || data.choice)) {
