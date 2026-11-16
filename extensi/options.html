@@ -241,6 +241,63 @@
       font-weight: 600;
     }
 
+    .engine-card-badge--soon {
+      color: var(--p-warn);
+      background: color-mix(in oklab, var(--p-warn) 12%, var(--p-surface));
+    }
+
+    .engine-card.is-coming-soon {
+      border-style: dashed;
+      opacity: 0.85;
+    }
+
+    .engine-card.is-coming-soon:hover {
+      opacity: 1;
+    }
+
+    .coming-soon-box {
+      padding: var(--s-4);
+      border-radius: var(--r-md);
+      background: var(--p-surface);
+      border: 1px dashed var(--line-strong);
+    }
+
+    .coming-soon-header {
+      display: flex;
+      align-items: center;
+      gap: var(--s-2);
+      margin-bottom: var(--s-1);
+    }
+
+    .coming-soon-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--p-warn);
+      flex-shrink: 0;
+    }
+
+    .coming-soon-title {
+      font-size: var(--t-sm);
+      font-weight: 600;
+      color: var(--p-ink);
+    }
+
+    .coming-soon-desc {
+      font-size: var(--t-xs);
+      color: var(--p-muted);
+      line-height: 1.5;
+    }
+
+    .coming-soon-desc code {
+      font-family: var(--font-mono);
+      background: var(--p-card);
+      padding: 1px 5px;
+      border-radius: 4px;
+      font-size: 11px;
+      color: var(--p-ink);
+    }
+
     .engine-card-desc {
       font-size: var(--t-xs);
       color: var(--p-muted);
@@ -438,16 +495,16 @@
           <div class="engine-card active" id="cardDirectAi">
             <div class="engine-card-header">
               <span class="engine-card-title">Direct AI</span>
-              <span class="engine-card-badge">Cloud</span>
+              <span class="engine-card-badge">BYOK</span>
             </div>
             <p class="engine-card-desc">Kirim soal langsung ke API Gemini, Groq, atau OpenAI.</p>
           </div>
           <div class="engine-card" id="cardLocalBackend">
             <div class="engine-card-header">
-              <span class="engine-card-title">Backend Lokal</span>
+              <span class="engine-card-title">Kamus Mini Cloud</span>
               <span class="engine-card-badge">Server</span>
             </div>
-            <p class="engine-card-desc">Ambil kunci dari server bank soal lokal (port 3000 / 5000).</p>
+            <p class="engine-card-desc">Ambil kunci otomatis dari server cloud mylms.melvino.online.</p>
           </div>
         </div>
 
@@ -502,15 +559,29 @@
           </div>
         </div>
 
-        <!-- Local Backend Panel -->
+        <!-- Kamus Mini Cloud Panel (Ready) -->
         <div id="panelLocalBackend" style="display: none;">
-          <div class="form-group field">
-            <label for="backendBaseUrl" class="form-label">Base URL Server</label>
-            <input type="text" id="backendBaseUrl" placeholder="http://localhost:3000">
+          <div class="form-group">
+            <span class="form-label">Endpoint Cloud Otomatis</span>
+            <div class="coming-soon-box" style="padding: var(--s-2) var(--s-3); border-style: solid; display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);">
+              <code style="font-family: var(--font-mono); font-size: 12px; color: var(--p-ink);">https://mylms.melvino.online</code>
+              <span class="engine-card-badge" style="color: var(--p-ok);">Aktif</span>
+            </div>
           </div>
-          <div class="form-group field">
-            <label for="backendApiKey" class="form-label">API Key Server (Header x-api-key)</label>
-            <input type="text" id="backendApiKey" placeholder="lms_agent_...">
+          <div class="form-group field" style="margin-top: var(--s-3);">
+            <label for="backendApiKey" class="form-label">API Key Kamus Mini Cloud (Header x-api-key)</label>
+            <div class="input-row">
+              <input type="password" id="backendApiKey" placeholder="lms_agent_...">
+              <button type="button" class="icon-btn" id="btnToggleCloudApiKey" aria-label="Lihat API Key Cloud" title="Lihat">
+                <svg viewBox="0 0 24 24"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg>
+              </button>
+            </div>
+          </div>
+          <div class="form-group" style="margin-top: var(--s-2);">
+            <div>
+              <button type="button" class="btn btn--secondary btn--sm" id="btnTestCloudConnection">Tes Koneksi Cloud</button>
+            </div>
+            <div class="test-feedback" id="cloudTestFeedback"></div>
           </div>
         </div>
       </section>

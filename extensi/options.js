@@ -62,9 +62,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
   const btnTestAiConnection = document.getElementById('btnTestAiConnection');
   const aiTestFeedback = document.getElementById('aiTestFeedback');
-
-  const backendBaseUrlInput = document.getElementById('backendBaseUrl');
   const backendApiKeyInput = document.getElementById('backendApiKey');
+  const btnToggleCloudApiKey = document.getElementById('btnToggleCloudApiKey');
+  const btnTestCloudConnection = document.getElementById('btnTestCloudConnection');
+  const cloudTestFeedback = document.getElementById('cloudTestFeedback');
+
+  const CLOUD_ENDPOINT = 'https://mylms.melvino.online';
 
   // DOM Elements - OCR
   const ocrEnabledInput = document.getElementById('ocrEnabled');
@@ -113,24 +116,25 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Switch engine UI
+  // Switch engine UI ('direct_ai' vs 'cloud')
   function setEngine(engine) {
-    currentEngine = engine;
-    if (engine === 'direct_ai') {
-      cardDirectAi.classList.add('active');
-      cardLocalBackend.classList.remove('active');
-      panelDirectAi.style.display = 'block';
-      panelLocalBackend.style.display = 'none';
-    } else {
+    const normalized = (engine === 'cloud' || engine === 'local_backend') ? 'cloud' : 'direct_ai';
+    currentEngine = normalized;
+    if (normalized === 'cloud') {
       cardDirectAi.classList.remove('active');
       cardLocalBackend.classList.add('active');
       panelDirectAi.style.display = 'none';
       panelLocalBackend.style.display = 'block';
+    } else {
+      cardDirectAi.classList.add('active');
+      cardLocalBackend.classList.remove('active');
+      panelDirectAi.style.display = 'block';
+      panelLocalBackend.style.display = 'none';
     }
   }
 
   cardDirectAi.addEventListener('click', () => setEngine('direct_ai'));
-  cardLocalBackend.addEventListener('click', () => setEngine('local_backend'));
+  cardLocalBackend.addEventListener('click', () => setEngine('cloud'));
 
   aiProviderSelect.addEventListener('change', () => {
     populateModels(aiProviderSelect.value);
@@ -153,6 +157,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   bindSecretToggle(aiApiKeyInput, btnToggleApiKey);
   bindSecretToggle(paddleOcrTokenInput, btnToggleOcrToken);
+  bindSecretToggle(backendApiKeyInput, btnToggleCloudApiKey);
 
   // Theme selector handling
   const themeButtons = [
@@ -201,6 +206,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const engine = res.solverEngine || 'direct_ai';
     setEngine(engine);
 
+    if (backendApiKeyInput) backendApiKeyInput.value = res.apiKey || '';
+
     const provider = res.aiProvider || 'gemini';
     aiProviderSelect.value = provider;
     aiCustomBaseUrlInput.value = res.aiCustomBaseUrl || 'https://api.deepseek.com/v1';
@@ -212,9 +219,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (ocrEnabledInput) ocrEnabledInput.checked = res.ocrEnabled !== false;
     if (paddleOcrTokenInput) paddleOcrTokenInput.value = res.paddleOcrToken || '';
     if (paddleOcrModelInput) paddleOcrModelInput.value = res.paddleOcrModel || 'PaddleOCR-VL-1.6';
-
-    backendBaseUrlInput.value = res.baseUrl || 'http://localhost:3000';
-    backendApiKeyInput.value = res.apiKey || '';
 
     baselineDelayInput.value = res.baselineDelay !== undefined ? res.baselineDelay : 3;
     matchThresholdInput.value = res.matchThreshold !== undefined ? res.matchThreshold : 75;
@@ -239,8 +243,8 @@ document.addEventListener('DOMContentLoaded', () => {
       ocrEnabled: ocrEnabledInput ? Boolean(ocrEnabledInput.checked) : true,
       paddleOcrToken: paddleOcrTokenInput ? paddleOcrTokenInput.value.trim() : '',
       paddleOcrModel: paddleOcrModelInput ? (paddleOcrModelInput.value.trim() || 'PaddleOCR-VL-1.6') : 'PaddleOCR-VL-1.6',
-      baseUrl: backendBaseUrlInput.value.trim() || 'http://localhost:3000',
-      apiKey: backendApiKeyInput.value.trim(),
+      baseUrl: CLOUD_ENDPOINT,
+      apiKey: backendApiKeyInput ? backendApiKeyInput.value.trim() : '',
       baselineDelay: parseFloat(baselineDelayInput.value) || 3,
       matchThreshold: parseInt(matchThresholdInput.value, 10) || 75,
       navigationMode: navigationModeSelect.value || 'semi_auto',
@@ -268,11 +272,10 @@ document.addEventListener('DOMContentLoaded', () => {
       aiCustomModelInput.value = 'deepseek-chat';
       populateModels('gemini', 'gemini-1.5-flash');
       aiApiKeyInput.value = '';
+      if (backendApiKeyInput) backendApiKeyInput.value = '';
       if (ocrEnabledInput) ocrEnabledInput.checked = true;
       if (paddleOcrTokenInput) paddleOcrTokenInput.value = '';
       if (paddleOcrModelInput) paddleOcrModelInput.value = 'PaddleOCR-VL-1.6';
-      backendBaseUrlInput.value = 'http://localhost:3000';
-      backendApiKeyInput.value = '';
       baselineDelayInput.value = 3;
       matchThresholdInput.value = 75;
       navigationModeSelect.value = 'semi_auto';
@@ -453,6 +456,56 @@ document.addEventListener('DOMContentLoaded', () => {
         ocrTestFeedback.textContent = `Tes PaddleOCR Gagal: ${err.message}`;
       } finally {
         btnTestPaddleOcr.disabled = false;
+      }
+    });
+  }
+
+  // Test Kamus Mini Cloud Connection
+  if (btnTestCloudConnection && cloudTestFeedback) {
+    btnTestCloudConnection.addEventListener('click', async () => {
+      const apiKey = backendApiKeyInput ? backendApiKeyInput.value.trim() : '';
+      if (!apiKey) {
+        cloudTestFeedback.className = 'test-feedback error';
+        cloudTestFeedback.textContent = 'Masukkan x-api-key Kamus Mini Cloud terlebih dahulu.';
+        cloudTestFeedback.style.display = 'block';
+        return;
+      }
+
+      cloudTestFeedback.className = 'test-feedback';
+      cloudTestFeedback.textContent = `Menghubungi ${CLOUD_ENDPOINT}/api/v1/agent/categories...`;
+      cloudTestFeedback.style.display = 'block';
+      btnTestCloudConnection.disabled = true;
+
+      try {
+        const res = await fetch(`${CLOUD_ENDPOINT}/api/v1/agent/categories`, {
+          method: 'GET',
+          headers: { 'x-api-key': apiKey }
+        });
+
+        let data = null;
+        try {
+          data = await res.json();
+        } catch (_) {
+          data = null;
+        }
+
+        if (!res.ok) {
+          const msg = data?.error || data?.message || `HTTP Error ${res.status}`;
+          throw new Error(msg);
+        }
+
+        if (data && data.success === false) {
+          throw new Error(data.error || 'Autentikasi Cloud gagal.');
+        }
+
+        const catCount = Array.isArray(data?.data) ? data.data.length : 0;
+        cloudTestFeedback.className = 'test-feedback success';
+        cloudTestFeedback.textContent = `Terhubung ke Kamus Mini Cloud (${catCount} kategori soal tersedia).`;
+      } catch (err) {
+        cloudTestFeedback.className = 'test-feedback error';
+        cloudTestFeedback.textContent = `Koneksi Cloud Gagal: ${err.message}`;
+      } finally {
+        btnTestCloudConnection.disabled = false;
       }
     });
   }

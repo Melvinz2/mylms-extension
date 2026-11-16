@@ -347,19 +347,31 @@ function renderMathInToast(element) {
   });
 }
 
-// ---- API KONEKTOR ----
+// ---- API KONEKTOR (KAMUS MINI CLOUD) ----
+const KAMUS_MINI_CLOUD_URL = 'https://mylms.melvino.online';
+const CLOUD_BACKEND_READY = true; // Cloud-Ready Build: langsung terhubung ke mylms.melvino.online
+
 async function fetchAnswer(query) {
   if (!query || query.trim().length < 5) return;
-  
+  if (!CLOUD_BACKEND_READY) {
+    showToast('', 'Cloud Coming Soon', 'info');
+    return;
+  }
+
   try {
-    const res = await fetch('http://localhost:5000/api/search', {
+    const cfg = await new Promise(r => chrome.storage.local.get(['apiKey'], r));
+    const headers = { 'Content-Type': 'application/json' };
+    if (cfg.apiKey) headers['x-api-key'] = cfg.apiKey;
+
+    const res = await safeFetch(`${KAMUS_MINI_CLOUD_URL}/api/search`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ query: query.trim() })
     });
     const data = await res.json();
-    if (data.success) {
-      showToast('', data.jawaban, 'info');
+    const answerText = data.jawaban || data.answer || '';
+    if ((data.success !== false) && answerText) {
+      showToast('', answerText, 'info');
       const toast = document.getElementById('g-dict-tooltip');
       if (toast) renderMathInToast(toast);
     }
@@ -487,6 +499,9 @@ function mergeCapturedDebugPreview(patch) {
 // ---- SCRAPING HELPER (TAHAP 3: LATEX & DECORATIVE IMAGE FILTERING) ----
 function isDecorativeImage(img) {
   if (!img) return false;
+  if (img.closest && img.closest('.editor_atto_toolbar, .editor_atto_notification, .tox-editor-header, .mce-toolbar')) {
+    return true;
+  }
   const nw = img.naturalWidth;
   const nh = img.naturalHeight;
   const cw = img.clientWidth || img.width;
@@ -599,8 +614,75 @@ function scrapeQuestionText(doc) {
   return qtextEl ? extractRichDomTextWithLatex(qtextEl) : "";
 }
 
+/**
+ * Locate active input / rich-text editor targets for essay & short-answer Moodle questions.
+ */
+function findAnswerTextTargets(doc) {
+  const d = doc || getQuizDocument() || document;
+  const hasChoiceInputs = Boolean(d.querySelector('.answer input[type="radio"], .answer input[type="checkbox"]'));
+
+  const attoEditable = d.querySelector('.answer .editor_atto_content[contenteditable="true"], .formulation .editor_atto_content[contenteditable="true"], .qtype_essay_response .editor_atto_content[contenteditable="true"]');
+  const contentEditable = attoEditable || d.querySelector('.answer [contenteditable="true"], .qtype_essay_response [contenteditable="true"]');
+
+  let tinymceBody = null;
+  const iframes = d.querySelectorAll('.answer iframe, .qtype_essay_response iframe');
+  for (const frame of iframes) {
+    try {
+      const fDoc = frame.contentDocument || frame.contentWindow?.document;
+      const fBody = fDoc && fDoc.body;
+      if (fBody && (fBody.isContentEditable || fBody.getAttribute('contenteditable') === 'true')) {
+        tinymceBody = { iframe: frame, doc: fDoc, body: fBody };
+        break;
+      }
+    } catch (_) {
+      // Skip cross-origin frames safely
+    }
+  }
+
+  let textarea = null;
+  const editorContainer = (attoEditable || contentEditable)?.closest('.editor_atto_wrap, .qtype_essay_editor, .qtype_essay_response, .answer');
+  if (editorContainer) {
+    textarea = editorContainer.querySelector('textarea');
+  }
+  if (!textarea) {
+    textarea = d.querySelector('.answer textarea, .qtype_essay_response textarea, .qtext textarea');
+  }
+
+  const textInput = d.querySelector('.answer input[type="text"], .answer input[type="number"], .qtext input[type="text"], .qtext input[type="number"]');
+
+  return {
+    hasChoiceInputs,
+    attoEditable,
+    contentEditable,
+    tinymceBody,
+    textarea,
+    textInput
+  };
+}
+
+/**
+ * Detect Moodle question input type: 'choice' | 'essay' | 'shortanswer'.
+ */
+function detectQuizInputType(doc) {
+  const d = doc || getQuizDocument() || document;
+  const targets = findAnswerTextTargets(d);
+  if (targets.hasChoiceInputs) return 'choice';
+
+  const isEssayClass = Boolean(d.querySelector('.que.essay, .qtype_essay_response, .editor_atto_wrap'));
+  if (isEssayClass || targets.attoEditable || targets.contentEditable || targets.tinymceBody || targets.textarea) {
+    return 'essay';
+  }
+  if (d.querySelector('.que.shortanswer, .que.numerical') || targets.textInput) {
+    return 'shortanswer';
+  }
+  return 'choice';
+}
+
 function scrapeOptionsText(doc) {
   const d = doc || getQuizDocument() || document;
+  if (detectQuizInputType(d) !== 'choice') {
+    return [];
+  }
   const optionElements = d.querySelectorAll('.answer > div');
   return Array.from(optionElements).map((el, idx) => {
     const numEl = el.querySelector('.answernumber');
@@ -1319,23 +1401,162 @@ function clickInputOption(optionElement, preserveOthers = false) {
 }
 const clickRadioOption = clickInputOption;
 
-function fillTextInputOption(answerText, doc) {
-  if (!answerText) return { success: false };
-  const d = doc || getQuizDocument() || document;
-  const input = d.querySelector('.answer input[type="text"], .answer input[type="number"], .qtext input[type="text"], .qtext input[type="number"]');
-  if (input) {
-    input.focus();
-    input.value = String(answerText).trim();
-    input.dispatchEvent(new Event('input', { bubbles: true }));
-    input.dispatchEvent(new Event('change', { bubbles: true }));
-    input.blur();
+function escapeHtmlForEditor(str) {
+  return String(str || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
-    input.setAttribute('data-km-selected', 'true');
-    input.style.outline = '1.5px solid #0d7480';
-    input.style.outlineOffset = '1px';
-    input.style.borderRadius = '4px';
-    return { success: true, element: input };
+function formatAnswerAsHtmlParagraphs(text) {
+  const normalized = String(text || '').replace(/\r\n/g, '\n');
+  if (!normalized) return '';
+  const lines = normalized.split('\n');
+  return lines.map(line => {
+    const trimmedRight = line.replace(/\s+$/g, '');
+    return trimmedRight ? `<p>${escapeHtmlForEditor(trimmedRight)}</p>` : '<p><br></p>';
+  }).join('');
+}
+
+function setNativeControlValue(el, value) {
+  if (!el) return;
+  const win = el.ownerDocument?.defaultView || window;
+  const proto = el.tagName === 'TEXTAREA'
+    ? (win.HTMLTextAreaElement?.prototype || HTMLTextAreaElement.prototype)
+    : (win.HTMLInputElement?.prototype || HTMLInputElement.prototype);
+  const setter = proto && Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (setter) {
+    setter.call(el, value);
+  } else {
+    el.value = value;
   }
+}
+
+function styleSelectedTarget(el) {
+  if (!el) return;
+  el.setAttribute('data-km-selected', 'true');
+  el.style.outline = '1.5px solid #0d7480';
+  el.style.outlineOffset = '1px';
+  el.style.borderRadius = '4px';
+}
+
+function dispatchTypingEvents(el, chunkText = '') {
+  if (!el) return;
+  const win = el.ownerDocument?.defaultView || window;
+  try {
+    if (typeof win.InputEvent === 'function') {
+      el.dispatchEvent(new win.InputEvent('input', {
+        bubbles: true,
+        cancelable: true,
+        inputType: 'insertText',
+        data: chunkText
+      }));
+    } else {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+  } catch (_) {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  try {
+    el.dispatchEvent(new Event('keyup', { bubbles: true }));
+  } catch (_) {}
+}
+
+function dispatchCommitEvents(el) {
+  if (!el) return;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  el.dispatchEvent(new Event('blur', { bubbles: true }));
+}
+
+async function typeTextGradually(fullText, onStep) {
+  const str = String(fullText || '');
+  const len = str.length;
+  if (len === 0) return;
+
+  const chunkSize = len <= 28 ? 2 : Math.max(3, Math.ceil(len / 28));
+  let pos = 0;
+  while (pos < len) {
+    const nextPos = Math.min(len, pos + chunkSize);
+    const partial = str.slice(0, nextPos);
+    const chunk = str.slice(pos, nextPos);
+    onStep(partial, chunk);
+    pos = nextPos;
+    if (pos < len) {
+      await new Promise(r => setTimeout(r, 16));
+    }
+  }
+}
+
+/**
+ * Type answer cleanly into Moodle Atto, TinyMCE iframe, generic contenteditable, textarea, or input.
+ */
+async function fillTextInputOption(answerText, doc) {
+  const cleanText = String(answerText || '').trim();
+  if (!cleanText) return { success: false };
+
+  const d = doc || getQuizDocument() || document;
+  const targets = findAnswerTextTargets(d);
+  const visualRichEl = targets.attoEditable
+    || targets.contentEditable
+    || (targets.tinymceBody ? targets.tinymceBody.body : null);
+
+  if (visualRichEl) {
+    const textarea = targets.textarea;
+    try { visualRichEl.focus(); } catch (_) {}
+
+    await typeTextGradually(cleanText, (partial, chunk) => {
+      const htmlPartial = formatAnswerAsHtmlParagraphs(partial);
+      visualRichEl.innerHTML = htmlPartial;
+      dispatchTypingEvents(visualRichEl, chunk);
+      if (textarea) {
+        setNativeControlValue(textarea, htmlPartial);
+        textarea.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    });
+
+    const finalHtml = formatAnswerAsHtmlParagraphs(cleanText);
+    visualRichEl.innerHTML = finalHtml;
+    if (textarea) {
+      setNativeControlValue(textarea, finalHtml);
+      dispatchCommitEvents(textarea);
+    }
+    try {
+      const ownerWin = (targets.tinymceBody?.doc?.defaultView) || d.defaultView || window;
+      if (ownerWin?.tinyMCE && typeof ownerWin.tinyMCE.triggerSave === 'function') {
+        ownerWin.tinyMCE.triggerSave();
+      }
+    } catch (_) {}
+
+    dispatchCommitEvents(visualRichEl);
+    const highlightBox = targets.attoEditable
+      ? (targets.attoEditable.closest('.editor_atto_content_wrap') || targets.attoEditable)
+      : (targets.tinymceBody ? targets.tinymceBody.iframe : visualRichEl);
+    styleSelectedTarget(highlightBox);
+
+    const mode = targets.attoEditable
+      ? 'atto_editor'
+      : (targets.tinymceBody ? 'tinymce_editor' : 'contenteditable');
+    return { success: true, mode, element: visualRichEl };
+  }
+
+  const plainTarget = targets.textarea || targets.textInput;
+  if (plainTarget) {
+    try { plainTarget.focus(); } catch (_) {}
+    await typeTextGradually(cleanText, (partial, chunk) => {
+      setNativeControlValue(plainTarget, partial);
+      dispatchTypingEvents(plainTarget, chunk);
+    });
+    setNativeControlValue(plainTarget, cleanText);
+    dispatchCommitEvents(plainTarget);
+    styleSelectedTarget(plainTarget);
+    return {
+      success: true,
+      mode: plainTarget.tagName === 'TEXTAREA' ? 'textarea' : 'text_input',
+      element: plainTarget
+    };
+  }
+
   return { success: false };
 }
 
@@ -1411,9 +1632,19 @@ function selectOptionByLetter(choiceLetter, doc) {
   return { success: false };
 }
 
-// ---- UNIFIED QUIZ ANSWER APPLIER (TAHAP 5) ----
-function applyAnswerToQuizDom({ choice, answer }, threshold = 0.60, doc) {
+// ---- UNIFIED QUIZ ANSWER APPLIER (TAHAP 5 + ESSAY / ATTO SUPPORT) ----
+async function applyAnswerToQuizDom({ choice, answer }, threshold = 0.60, doc) {
   const d = doc || getQuizDocument() || document;
+  const inputType = detectQuizInputType(d);
+
+  // Essay / Rich-text editor / Short-answer typed input takes direct typing path
+  if (inputType === 'essay' || inputType === 'shortanswer') {
+    const typedMatch = await fillTextInputOption(answer || choice, d);
+    if (typedMatch.success) {
+      return { success: true, mode: typedMatch.mode || 'text_input', element: typedMatch.element };
+    }
+    return { success: false };
+  }
 
   // 1. Opsi Multiple Response (Checkboxes A, C dll.)
   if (choice && (choice.includes(',') || choice.length > 1) && !['BENAR', 'SALAH', 'TRUE', 'FALSE'].includes(choice.toUpperCase())) {
@@ -1437,9 +1668,9 @@ function applyAnswerToQuizDom({ choice, answer }, threshold = 0.60, doc) {
     if (matched.success) return { success: true, mode: 'text_fuzzy', element: matched.element };
   }
 
-  // 4. Isian Singkat / Input Angka jika formulir Moodle berupa text box
-  const textMatch = fillTextInputOption(answer || choice, d);
-  if (textMatch.success) return { success: true, mode: 'text_input', element: textMatch.element };
+  // 4. Fallback terakhir: ketik ke text input / textarea / editor jika tersedia
+  const textMatch = await fillTextInputOption(answer || choice, d);
+  if (textMatch.success) return { success: true, mode: textMatch.mode || 'text_input', element: textMatch.element };
 
   return { success: false };
 }
@@ -1469,8 +1700,37 @@ function extractReasoningText(rawText) {
   return text;
 }
 
-function parseAiResponse(rawText) {
+function parseAiJsonCandidate(candidateText) {
+  if (!candidateText) return null;
+  try {
+    return JSON.parse(candidateText);
+  } catch (_) {
+    // Recover JSON when LLM embeds raw newlines inside string values
+    try {
+      const escaped = candidateText.replace(/"(?:\\.|[^"\\])*"/g, m =>
+        m.replace(/\r\n/g, '\\n').replace(/\n/g, '\\n').replace(/\r/g, '\\r')
+      );
+      return JSON.parse(escaped);
+    } catch (__) {
+      return null;
+    }
+  }
+}
+
+function normalizeParsedAnswerObj(obj, reasoning, isTypedMode) {
+  if (!obj || typeof obj !== 'object') return null;
+  const rawChoice = String(obj.choice || obj.pilihan || obj.jawaban_huruf || '').trim().toUpperCase();
+  const choice = isTypedMode ? '' : rawChoice;
+  const answer = String(obj.answer || obj.jawaban || obj.teks || '').trim();
+  if (choice || answer) {
+    return { choice, answer, reasoning };
+  }
+  return null;
+}
+
+function parseAiResponse(rawText, expectedType = 'choice') {
   if (!rawText) return { choice: '', answer: '', reasoning: '' };
+  const isTypedMode = (expectedType === 'essay' || expectedType === 'shortanswer');
   const reasoning = extractReasoningText(rawText);
 
   // 1. Bersihkan tag pemikiran model AI (<think>, <thought>, <reasoning>, markdown)
@@ -1482,39 +1742,53 @@ function parseAiResponse(rawText) {
     .replace(/```/g, '')
     .trim();
 
-  // 2. Prioritas 1: Cari semua blok JSON { ... } yang mengandung kata kunci choice atau answer
-  const jsonRegex = /\{[^{}]*(?:"choice"|"pilihan"|"answer"|"jawaban")[^{}]*\}/gi;
-  const jsonMatches = clean.match(jsonRegex);
-
-  if (jsonMatches && jsonMatches.length > 0) {
-    for (let i = jsonMatches.length - 1; i >= 0; i--) {
-      try {
-        const obj = JSON.parse(jsonMatches[i]);
-        const choice = (obj.choice || obj.pilihan || obj.jawaban_huruf || '').trim().toUpperCase();
-        const answer = String(obj.answer || obj.jawaban || obj.teks || '').trim();
-        if (choice || answer) {
-          return { choice, answer, reasoning };
-        }
-      } catch (e) {}
+  // 2. Prioritas 1: Telusuri kandidat '{' dari belakang menuju lastClose (aman jika teks jawaban berisi '{...}' atau LaTeX '\frac{a}{b}')
+  const lastClose = clean.lastIndexOf('}');
+  if (lastClose !== -1) {
+    let searchEnd = lastClose;
+    let tries = 0;
+    while (searchEnd > 0 && tries < 24) {
+      const openIdx = clean.lastIndexOf('{', searchEnd - 1);
+      if (openIdx === -1) break;
+      tries++;
+      const candidate = clean.slice(openIdx, lastClose + 1);
+      if (/"(?:choice|pilihan|answer|jawaban|teks)"/i.test(candidate)) {
+        const parsedObj = normalizeParsedAnswerObj(parseAiJsonCandidate(candidate), reasoning, isTypedMode);
+        if (parsedObj) return parsedObj;
+      }
+      searchEnd = openIdx;
     }
   }
 
-  // 3. Prioritas 2: Temukan kurung kurawal terakhir (last { ... }) jika JSON terformat multi-line
-  const lastOpen = clean.lastIndexOf('{');
-  const lastClose = clean.lastIndexOf('}');
-  if (lastOpen !== -1 && lastClose > lastOpen) {
-    try {
-      const candidate = clean.slice(lastOpen, lastClose + 1);
-      const obj = JSON.parse(candidate);
-      const choice = (obj.choice || obj.pilihan || obj.jawaban_huruf || '').trim().toUpperCase();
-      const answer = String(obj.answer || obj.jawaban || obj.teks || '').trim();
-      if (choice || answer) {
-        return { choice, answer, reasoning };
-      }
-    } catch (e) {}
+  // 3. Prioritas 2: Regex blok JSON single-line/compact
+  const jsonRegex = /\{[^{}]*(?:"choice"|"pilihan"|"answer"|"jawaban"|"teks")[^{}]*\}/gi;
+  const jsonMatches = clean.match(jsonRegex);
+  if (jsonMatches && jsonMatches.length > 0) {
+    for (let i = jsonMatches.length - 1; i >= 0; i--) {
+      const parsedMatch = normalizeParsedAnswerObj(parseAiJsonCandidate(jsonMatches[i]), reasoning, isTypedMode);
+      if (parsedMatch) return parsedMatch;
+    }
   }
 
-  // 4. Fallback Cerdas: Cari kesimpulan huruf di bagian akhir teks
+  // 4. Untuk mode Essay / Short-Answer: tangani JSON yang kutip dalamnya tidak ter-escape, hindari regex tebakan A-E
+  if (isTypedMode) {
+    const answerFieldMatch = clean.match(/"(?:answer|jawaban|teks)"\s*:\s*"([\s\S]*?)"\s*(?:,\s*"(?:choice|pilihan|reasoning|jawaban_huruf)"|\n\s*\}|\}$)/i);
+    if (answerFieldMatch && answerFieldMatch[1]) {
+      const extracted = answerFieldMatch[1]
+        .replace(/\\n/g, '\n')
+        .replace(/\\"/g, '"')
+        .replace(/\\\\/g, '\\')
+        .trim();
+      if (extracted) return { choice: '', answer: extracted, reasoning };
+    }
+    const strippedPlain = clean
+      .replace(/\{[\s\S]*$/g, '')
+      .replace(/^(?:jawaban|answer)\s*:\s*/i, '')
+      .trim();
+    return { choice: '', answer: strippedPlain || clean, reasoning };
+  }
+
+  // 5. Fallback Cerdas pilihan ganda: Cari kesimpulan huruf di bagian akhir teks
   const conclusionRegexes = [
     /(?:pilihan|opsi|jawaban)\s*(?:yang\s+sesuai|yang\s+benar|akhir)?\s*(?:adalah|=)?\s*[:\s]*\b([A-E])\b/gi,
     /"choice"\s*:\s*"([A-E])"/gi,
@@ -1531,16 +1805,16 @@ function parseAiResponse(rawText) {
     }
   }
 
-  // 5. Fallback Terakhir: Ekstrak huruf dari baris paling terakhir teks jika formatnya "E. 224 cm²" atau "E"
+  // 6. Fallback Terakhir pilihan ganda: huruf di baris paling akhir
   const lines = clean.split('\n').map(l => l.trim()).filter(Boolean);
   if (lines.length > 0) {
     const lastLine = lines[lines.length - 1];
     const letterPrefixMatch = lastLine.match(/^([A-E])[\.\)\s]/i);
     if (letterPrefixMatch) {
-      return { 
-        choice: letterPrefixMatch[1].toUpperCase(), 
+      return {
+        choice: letterPrefixMatch[1].toUpperCase(),
         answer: lastLine.replace(/^([A-E])[\.\)\s]/i, '').trim(),
-        reasoning 
+        reasoning
       };
     }
   }
@@ -1735,8 +2009,9 @@ async function callConfiguredAiApi({ provider, apiKey, model, config, systemProm
   };
 }
 
-function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning = false }) {
-  const letters = (options || [])
+function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning = false, questionType = 'choice' }) {
+  const isTypedMode = (questionType === 'essay' || questionType === 'shortanswer');
+  const letters = isTypedMode ? [] : (options || [])
     .map(opt => {
       const m = String(opt).match(/^([A-E])\./);
       return m ? m[1] : null;
@@ -1746,11 +2021,26 @@ function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWa
     ? `\nPilihan radio aktif pada halaman (${letters.join(', ')}).`
     : '';
 
+  const kindLabel = isTypedMode ? 'ujian isian / essay' : 'ujian pilihan ganda';
   const intro = hasDiagramImages
     ? (groqNoVisionWarning
-      ? 'Ini adalah soal ujian pilihan ganda hasil ekstraksi OCR (Markdown & LaTeX). Diagram visual tidak dapat dilampirkan ke model aktif, gunakan seluruh informasi teks & angka OCR sebaik mungkin.'
-      : 'Ini adalah soal ujian pilihan ganda. Seluruh teks, angka, rumus LaTeX, dan pilihan jawaban telah diekstrak oleh OCR (Markdown di bawah), dan potongan gambar diagram/bangunan ([Gambar Diagram #...]) dilampirkan pada pesan ini.')
-    : 'Ini adalah soal ujian pilihan ganda hasil ekstraksi OCR (Markdown & LaTeX) dari tampilan soal bergambar/rumus tanpa diagram tambahan.';
+      ? `Ini adalah soal ${kindLabel} hasil ekstraksi OCR (Markdown & LaTeX). Diagram visual tidak dapat dilampirkan ke model aktif, gunakan seluruh informasi teks & angka OCR sebaik mungkin.`
+      : `Ini adalah soal ${kindLabel}. Seluruh teks, angka, dan rumus LaTeX telah diekstrak oleh OCR (Markdown di bawah), dan potongan gambar diagram/bangunan ([Gambar Diagram #...]) dilampirkan pada pesan ini.`)
+    : `Ini adalah soal ${kindLabel} hasil ekstraksi OCR (Markdown & LaTeX) dari tampilan soal bergambar/rumus tanpa diagram tambahan.`;
+
+  const diagramClause = (hasDiagramImages && !groqNoVisionWarning) ? ' serta gambar diagram terlampir' : '';
+  const instructions = isTypedMode
+    ? `Instruksi Pengerjaan:
+1. Baca seluruh teks soal dan rumus LaTeX ($...$)${diagramClause} di atas dengan teliti.
+2. Jika soal berbentuk melengkapi titik-titik / rumpang / angka singkat, tuliskan HANYA kata/frasa/nilai pengisinya saja tanpa mengulang kalimat soal.
+3. Jika soal berbentuk uraian terbuka ("Jelaskan...", analisis, hitungan), susun jawaban yang jelas, padat, dan langsung ke inti (teks polos tanpa format Markdown).
+4. Di akhir respons, WAJIB sertakan kesimpulan dalam format JSON persis:
+{"choice": "", "answer": "teks jawaban final yang siap diketik ke kotak jawaban"}`
+    : `Instruksi Pengerjaan:
+1. Baca seluruh teks soal, rumus LaTeX ($...$),${hasDiagramImages && !groqNoVisionWarning ? ' gambar diagram terlampir,' : ''} serta pilihan A sampai E di atas dengan sangat teliti.
+2. Lakukan perhitungan matematis / penalaran langkah demi langkah hingga tuntas (misal jika mencari tembereng lingkaran: hitung luas juring lalu kurangi luas segitiga, jangan berhenti di tengah).
+3. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON persis:
+{"choice": "huruf pilihan kapital (A/B/C/D/E)", "answer": "teks atau angka jawaban yang dipilih"}`;
 
   return `${intro}${letterHint}
 
@@ -1758,11 +2048,87 @@ function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWa
 ${ocrMarkdown}
 --- AKHIR HASIL OCR ---
 
+${instructions}`;
+}
+
+function buildDirectAiPrompts({ questionType = 'choice', mode = 'text', questionText = '', options = [], ocrMarkdown = '', hasDiagramImages = false, groqNoVisionWarning = false }) {
+  const isTypedMode = (questionType === 'essay' || questionType === 'shortanswer');
+  const systemPrompt = isTypedMode
+    ? 'Kamu adalah asisten ahli akademik dan pemecah soal ujian isian/essay yang sangat teliti. Analisis soal dengan cermat, lalu akhiri dengan format JSON valid {"choice": "", "answer": "jawaban final siap diketik ke kotak jawaban"}.'
+    : 'Kamu adalah asisten ahli matematika dan pemecah ujian pilihan ganda yang sangat teliti. Analisis teks dan gambar secara cermat, hitung langkah demi langkah hingga tuntas, dan akhiri dengan format JSON {"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks jawaban"}.';
+
+  if (mode === 'ocr') {
+    return {
+      systemPrompt,
+      userPrompt: buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning, questionType })
+    };
+  }
+
+  if (mode === 'vision') {
+    if (isTypedMode) {
+      return {
+        systemPrompt,
+        userPrompt: `Ini adalah soal ujian isian / essay tanpa pilihan ganda (gambar soal terlampir).
+
 Instruksi Pengerjaan:
-1. Baca seluruh teks soal, rumus LaTeX ($...$),${hasDiagramImages && !groqNoVisionWarning ? ' gambar diagram terlampir,' : ''} serta pilihan A sampai E di atas dengan sangat teliti.
-2. Lakukan perhitungan matematis / penalaran langkah demi langkah hingga tuntas (misal jika mencari tembereng lingkaran: hitung luas juring lalu kurangi luas segitiga, jangan berhenti di tengah).
-3. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON persis:
-{"choice": "huruf pilihan kapital (A/B/C/D/E)", "answer": "teks atau angka jawaban yang dipilih"}`;
+1. Amati gambar soal secara utuh dan teliti (teks pertanyaan, titik-titik rumpang, rumus, nilai pada diagram).
+2. Jika soal berbentuk melengkapi titik-titik / rumpang / angka singkat (misal "...nasional"), berikan HANYA kata/frasa/nilai pengisinya saja tanpa mengulang kalimat soal.
+3. Jika soal berbentuk uraian terbuka ("Jelaskan...", "Mengapa...", analisis/hitungan), tuliskan jawaban jelas dan ringkas dalam teks polos tanpa format Markdown.
+4. Di akhir respons, WAJIB sertakan kesimpulan dalam format JSON persis:
+{"choice": "", "answer": "teks jawaban final yang siap diketik langsung"}`
+      };
+    }
+
+    const optionsText = options && options.length > 0
+      ? `\nPilihan Jawaban yang Tersedia:\n${options.join('\n')}\n`
+      : '';
+    return {
+      systemPrompt,
+      userPrompt: `Ini adalah soal ujian pilihan ganda (gambar soal terlampir).
+${optionsText}
+Instruksi Pengerjaan:
+1. Amati gambar soal secara utuh dan teliti (baca teks soal, rumus, nilai sudut/jari-jari/sisi pada diagram, dan tentukan apa yang dicari).
+2. Periksa SELURUH pilihan jawaban dari A sampai E yang ada di gambar / daftar pilihan.
+3. Lakukan perhitungan matematis secara seksama langkah demi langkah hingga tuntas (contoh: jika mencari luas daerah diarsir/tembereng, hitung luas juring lingkaran terlebih dahulu, lalu kurangkan dengan luas segitiga, jangan berhenti hanya di luas segitiga saja).
+4. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON persis:
+{"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks atau angka jawaban yang dipilih"}`
+    };
+  }
+
+  // mode === 'text'
+  if (isTypedMode) {
+    return {
+      systemPrompt,
+      userPrompt: `Kamu adalah asisten pemecah soal ujian isian & essay yang cerdas dan teliti. Tidak ada pilihan ganda pada soal ini karena jawaban akan diketik langsung ke kotak teks LMS.
+
+Instruksi Pengerjaan:
+1. Pahami konteks kalimat soal dan jenis pertanyaan dengan cermat.
+2. Jika soal berbentuk melengkapi titik-titik / rumpang / isian singkat (contoh: "...merupakan pengertian dari...nasional"), tuliskan HANYA kata/frasa/angka pengisi yang tepat (contoh: "Integrasi") tanpa mengulang kalimat soal.
+3. Jika soal berbentuk uraian terbuka ("Jelaskan...", "Mengapa...", "Uraikan..."), tulis jawaban yang jelas, padat, dan langsung pada inti (1-2 paragraf atau poin teks polos tanpa format Markdown).
+4. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON valid berikut:
+{"choice": "", "answer": "teks jawaban final yang siap diketik langsung"}
+
+Soal:
+${questionText}`
+    };
+  }
+
+  return {
+    systemPrompt,
+    userPrompt: `Kamu adalah asisten pemecah soal ujian pilihan ganda yang cerdas dan teliti. Analisis soal berikut dan tentukan satu jawaban yang paling tepat.
+
+Instruksi Pengerjaan:
+1. Pahami pertanyaan dan pilihan jawaban secara mendalam.
+2. Analisis dan hitung langkah demi langkah hingga mendapatkan jawaban yang pasti.
+3. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON valid berikut:
+{"choice": "huruf pilihan kapital (A/B/C/D/E)", "answer": "teks pilihan jawaban yang dipilih"}
+
+Soal:
+${questionText}
+
+Pilihan:
+${(options || []).join('\n')}`
+  };
 }
 
 // ======================================================
@@ -1854,7 +2220,9 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
   const apiKey = config.aiApiKey;
   const provider = config.aiProvider || 'gemini';
   const model = config.aiModel || 'gemini-1.5-flash';
-  const threshold = config.matchThreshold !== undefined ? Number(config.matchThreshold) : 0.70;
+  const rawThreshDirect = config.matchThreshold !== undefined ? Number(config.matchThreshold) : 0.70;
+  const threshold = rawThreshDirect > 1 ? rawThreshDirect / 100 : rawThreshDirect;
+  const questionType = detectQuizInputType(d);
   const ocrEnabled = config.ocrEnabled !== false;
   const ocrToken = String(config.paddleOcrToken || '').trim();
   const ocrModel = String(config.paddleOcrModel || 'PaddleOCR-VL-1.6').trim() || 'PaddleOCR-VL-1.6';
@@ -1908,8 +2276,9 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       }))
     });
 
-    const aiSystemPrompt = 'Kamu adalah asisten ahli matematika dan pemecah ujian pilihan ganda yang sangat teliti. Analisis teks Markdown/LaTeX dan gambar (jika terlampir) secara cermat, hitung langkah demi langkah hingga tuntas, dan akhiri dengan format JSON {"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks jawaban"}.';
-    const ocrUserPrompt = buildOcrPrompt({
+    const { systemPrompt: aiSystemPrompt, userPrompt: ocrUserPrompt } = buildDirectAiPrompts({
+      questionType,
+      mode: 'ocr',
       ocrMarkdown: cachedOcr.cleanMarkdown,
       options,
       hasDiagramImages: hasDiagrams,
@@ -1923,6 +2292,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       provider,
       model: (provider === 'custom') ? (config.aiCustomModel || model) : model,
       ocrMode,
+      questionType,
       attachedDiagramCount: attachImages.length,
       promptLen: ocrUserPrompt.length
     });
@@ -1937,7 +2307,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       images: attachImages
     });
 
-    const parsed = parseAiResponse(aiResp.rawReply);
+    const parsed = parseAiResponse(aiResp.rawReply, questionType);
     logDebugEvent(logCategory, 'INFO', `Respons ${ocrMode} diterima (HTTP ${aiResp.httpStatus}, ${aiResp.durationMs}ms)`, {
       qNum,
       ocrMode,
@@ -1956,7 +2326,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       aiModel: aiResp.model
     });
 
-    const matched = applyAnswerToQuizDom(parsed, 0.60, d);
+    const matched = await applyAnswerToQuizDom(parsed, 0.60, d);
     const modeLabel = (ocrMode === 'OCR_VISION_CROP') ? 'PaddleOCR + Vision Crop (Cache)' : 'PaddleOCR + Text AI (Cache)';
     if (matched.success) {
       logAgentActivity(`[Soal ${qNum}] ${modeLabel} Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
@@ -2094,8 +2464,9 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           logAgentActivity(`[Soal ${qNum}] PaddleOCR: Teks/rumus murni (${ocrRes.stats.markdownLen} char, 0 diagram). Mengirim Markdown bersih ke ${provider.toUpperCase()}...`);
         }
 
-        const aiSystemPrompt = 'Kamu adalah asisten ahli matematika dan pemecah ujian pilihan ganda yang sangat teliti. Analisis teks Markdown/LaTeX dan gambar (jika terlampir) secara cermat, hitung langkah demi langkah hingga tuntas, dan akhiri dengan format JSON {"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks jawaban"}.';
-        const ocrUserPrompt = buildOcrPrompt({
+        const { systemPrompt: aiSystemPrompt, userPrompt: ocrUserPrompt } = buildDirectAiPrompts({
+          questionType,
+          mode: 'ocr',
           ocrMarkdown: ocrRes.cleanMarkdown,
           options,
           hasDiagramImages: hasDiagrams,
@@ -2109,6 +2480,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           provider,
           model: (provider === 'custom') ? (config.aiCustomModel || model) : model,
           ocrMode,
+          questionType,
           attachedDiagramCount: attachImages.length,
           promptLen: ocrUserPrompt.length
         });
@@ -2123,7 +2495,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           images: attachImages
         });
 
-        const parsed = parseAiResponse(aiResp.rawReply);
+        const parsed = parseAiResponse(aiResp.rawReply, questionType);
         logDebugEvent(logCategory, 'INFO', `Respons ${ocrMode} diterima (HTTP ${aiResp.httpStatus}, ${aiResp.durationMs}ms)`, {
           qNum,
           ocrMode,
@@ -2142,7 +2514,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           aiModel: aiResp.model
         });
 
-        const matched = applyAnswerToQuizDom(parsed, 0.60, d);
+        const matched = await applyAnswerToQuizDom(parsed, 0.60, d);
         const modeLabel = (ocrMode === 'OCR_VISION_CROP') ? 'PaddleOCR + Vision Crop' : 'PaddleOCR + Text AI';
         if (matched.success) {
           logAgentActivity(`[Soal ${qNum}] ${modeLabel} Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
@@ -2171,23 +2543,16 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
     // 1B. DIRECT VISION SCREENSHOT PENUH (DEFAULT TANPA OCR ATAU FALLBACK SAAT OCR GAGAL)
     if (base64Data && supportsVision) {
       try {
-        const optionsText = options && options.length > 0 
-          ? `\nPilihan Jawaban yang Tersedia:\n${options.join('\n')}\n` 
-          : '';
-
-        const promptText = `Ini adalah soal ujian pilihan ganda (gambar soal terlampir).
-${optionsText}
-Instruksi Pengerjaan:
-1. Amati gambar soal secara utuh dan teliti (baca teks soal, rumus, nilai sudut/jari-jari/sisi pada diagram, dan tentukan apa yang dicari).
-2. Periksa SELURUH pilihan jawaban dari A sampai E yang ada di gambar / daftar pilihan.
-3. Lakukan perhitungan matematis secara seksama langkah demi langkah hingga tuntas (contoh: jika mencari luas daerah diarsir/tembereng, hitung luas juring lingkaran terlebih dahulu, lalu kurangkan dengan luas segitiga, jangan berhenti hanya di luas segitiga saja).
-4. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON persis:
-{"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks atau angka jawaban yang dipilih"}`;
+        const { systemPrompt: visionSystemPrompt, userPrompt: promptText } = buildDirectAiPrompts({
+          questionType,
+          mode: 'vision',
+          options
+        });
 
         const targetModel = (provider === 'custom') ? (config.aiCustomModel || model) : model;
         logAgentActivity(`[Soal ${qNum}] Mengirim gambar (${captureDiag.canvasSize?.width || '?'}x${captureDiag.canvasSize?.height || '?'}, ${imageKB} KB, ${captureDiag.slices?.length || 1} slice) ke ${provider.toUpperCase()} Vision (${targetModel})...`);
         logDebugEvent('AI_VISION', 'INFO', `Mengirim request Vision ke ${provider.toUpperCase()}`, {
-          qNum, provider, model: targetModel, imageKB,
+          qNum, provider, model: targetModel, imageKB, questionType,
           base64Len: base64Data.length,
           canvasSize: captureDiag.canvasSize, slices: captureDiag.slices?.length,
           isLikelyBlank: captureDiag.blankCheck?.isLikelyBlank
@@ -2198,12 +2563,12 @@ Instruksi Pengerjaan:
           apiKey,
           model,
           config,
-          systemPrompt: 'Kamu adalah asisten ahli matematika dan pemecah ujian pilihan ganda yang sangat teliti. Analisis gambar dengan teliti, hitung langkah demi langkah hingga tuntas, dan akhiri dengan format JSON {"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks jawaban"}.',
+          systemPrompt: visionSystemPrompt,
           userPrompt: promptText,
           images: [{ mimeType: 'image/png', base64: base64Data, dataUrl: dataUrlFull }]
         });
 
-        const parsed = parseAiResponse(aiResp.rawReply);
+        const parsed = parseAiResponse(aiResp.rawReply, questionType);
         logDebugEvent('AI_VISION', 'INFO', `Respons Vision diterima (HTTP ${aiResp.httpStatus}, ${aiResp.durationMs}ms)`, {
           qNum,
           httpStatus: aiResp.httpStatus,
@@ -2221,7 +2586,7 @@ Instruksi Pengerjaan:
           aiModel: aiResp.model
         });
 
-        const matched = applyAnswerToQuizDom(parsed, 0.60, d);
+        const matched = await applyAnswerToQuizDom(parsed, 0.60, d);
         if (matched.success) {
           logAgentActivity(`[Soal ${qNum}] Direct AI (Vision) Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
           return { success: true, mode: 'Direct AI Vision' };
@@ -2251,33 +2616,27 @@ Instruksi Pengerjaan:
       questionLen: questionText.length, options
     });
 
-    const promptText = `Kamu adalah asisten pemecah soal ujian pilihan ganda yang cerdas dan teliti. Analisis soal berikut dan tentukan satu jawaban yang paling tepat.
-
-Instruksi Pengerjaan:
-1. Pahami pertanyaan dan pilihan jawaban secara mendalam.
-2. Analisis dan hitung langkah demi langkah hingga mendapatkan jawaban yang pasti.
-3. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON valid berikut:
-{"choice": "huruf pilihan kapital (A/B/C/D/E)", "answer": "teks pilihan jawaban yang dipilih"}
-
-Soal:
-${questionText}
-
-Pilihan:
-${options.join('\n')}`;
+    const { systemPrompt: textSystemPrompt, userPrompt: promptText } = buildDirectAiPrompts({
+      questionType,
+      mode: 'text',
+      questionText,
+      options
+    });
 
     const aiResp = await callConfiguredAiApi({
       provider,
       apiKey,
       model,
       config,
-      systemPrompt: 'Kamu adalah asisten ahli dan pemecah ujian pilihan ganda. Analisis soal dengan cermat, hitung langkah demi langkah, dan akhiri dengan format JSON {"choice": "huruf A-E", "answer": "teks jawaban"}.',
+      systemPrompt: textSystemPrompt,
       userPrompt: promptText,
       images: []
     });
 
-    const parsed = parseAiResponse(aiResp.rawReply);
+    const parsed = parseAiResponse(aiResp.rawReply, questionType);
     logDebugEvent('AI_TEXT', 'INFO', `Respons Text diterima`, {
       qNum,
+      questionType,
       replyLen: aiResp.rawReply.length,
       replyPreview: aiResp.rawReply.slice(0, 700),
       parsed
@@ -2291,12 +2650,13 @@ ${options.join('\n')}`;
       aiModel: aiResp.model
     });
 
-    const matched = applyAnswerToQuizDom(parsed, threshold, d);
+    const matched = await applyAnswerToQuizDom(parsed, threshold, d);
     if (matched.success) {
-      logAgentActivity(`[Soal ${qNum}] Direct AI Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
+      const actionVerb = (questionType === 'choice') ? `Memilih ${parsed.choice || 'Jawaban'}` : 'Mengetik jawaban';
+      logAgentActivity(`[Soal ${qNum}] Direct AI Sukses! ${actionVerb}. (${parsed.answer || ''})`);
       return { success: true, mode: 'Direct AI' };
     } else {
-      logAgentActivity(`⚠️ [Soal ${qNum}] AI merespons ${parsed.choice || ''}: ${parsed.answer || ''}, tetapi gagal mencocokkan ke elemen opsi.`);
+      logAgentActivity(`⚠️ [Soal ${qNum}] AI merespons ${parsed.choice || ''}: ${parsed.answer || ''}, tetapi gagal mengisi elemen jawaban.`);
     }
   } catch (err) {
     logDebugEvent('AI_TEXT', 'ERROR', `Direct AI Error: ${err.message}`, { qNum, error: err.message });
@@ -2329,6 +2689,7 @@ async function solveQuestionFlow(qNum, doc) {
   ], r));
 
   const engine = config.solverEngine || 'direct_ai';
+  const questionType = detectQuizInputType(d);
   const questionText = scrapeQuestionText(d);
   const options = scrapeOptionsText(d);
   const ctxInfo = findQuizContextInRoot(document, d);
@@ -2336,6 +2697,7 @@ async function solveQuestionFlow(qNum, doc) {
 
   logDebugEvent('SOLVER', 'INFO', `Memulai pengerjaan Soal #${qNum}`, {
     engine,
+    questionType,
     provider: config.aiProvider || 'gemini',
     model: (config.aiProvider === 'custom') ? (config.aiCustomModel || config.aiModel) : (config.aiModel || 'default'),
     ocrEnabled: config.ocrEnabled !== false,
@@ -2349,19 +2711,23 @@ async function solveQuestionFlow(qNum, doc) {
     options
   });
 
-  // JIKA MENGGUNAKAN DIRECT AI (REKOMENDASI)
-  if (engine === 'direct_ai') {
+  // JIKA MENGGUNAKAN DIRECT AI (atau Kamus Mini Cloud belum ready / Coming Soon)
+  if (engine === 'direct_ai' || !CLOUD_BACKEND_READY) {
+    if (engine !== 'direct_ai' && !CLOUD_BACKEND_READY) {
+      logAgentActivity(`[Soal ${qNum}] Kamus Mini Cloud masih Coming Soon -> dialihkan ke Direct AI.`);
+    }
     return await solveWithDirectAI(qNum, questionText, options, config, d);
   }
 
-  // JIKA MENGGUNAKAN BACKEND SERVER LOKAL (LEGACY)
-  const apiKey = config.apiKey || "";
-  const baseUrl = (config.baseUrl || "http://localhost:3000").replace(/\/$/, "");
-  const threshold = config.matchThreshold !== undefined ? Number(config.matchThreshold) : 0.75;
+  // JIKA MENGGUNAKAN KAMUS MINI CLOUD (mylms.melvino.online)
+  const apiKey = (config.apiKey || "").trim();
+  const baseUrl = KAMUS_MINI_CLOUD_URL;
+  const rawThresh = config.matchThreshold !== undefined ? Number(config.matchThreshold) : 75;
+  const threshold = rawThresh > 1 ? rawThresh / 100 : rawThresh;
 
   if (!apiKey) {
-    showToast("", "Backend belum diatur", "error");
-    logAgentActivity("❌ Gagal: Backend API Key belum diatur. Agen dihentikan.");
+    showToast("", "Cloud Key kosong", "error");
+    logAgentActivity("❌ Gagal: API Key Kamus Mini Cloud belum diatur. Agen dihentikan.");
     isAgentRunning = false;
     chrome.storage.local.set({ agentState: { status: 'idle' } });
     return { success: false, mode: 'Config Error' };
@@ -2369,7 +2735,7 @@ async function solveQuestionFlow(qNum, doc) {
   
   // 0. Cek Awal: Deteksi Gambar -> Langsung Fallback 2 (Math Mode)
   if (checkForImageTags(d)) {
-    logAgentActivity(`[Soal ${qNum}] Terdeteksi Gambar/Rumus. Langsung dialihkan ke Fallback 2 (Math Mode Screenshot).`);
+    logAgentActivity(`[Soal ${qNum}] Terdeteksi Gambar/Rumus. Langsung dialihkan ke Fallback 2 (Cloud Math Mode).`);
     return await executeFallback2(qNum, baseUrl, apiKey, threshold, d);
   }
 
@@ -2377,8 +2743,8 @@ async function solveQuestionFlow(qNum, doc) {
   // ATTEMPT 1: Fast Text Search (Soal Saja)
   // ==========================================
   try {
-    logAgentActivity(`[Soal ${qNum}] Attempt 1: Fast Text Search (Soal Saja)...`);
-    const response = await fetch(`${baseUrl}/api/v1/agent/search-answer`, {
+    logAgentActivity(`[Soal ${qNum}] Attempt 1: Fast Text Search (${baseUrl})...`);
+    const response = await safeFetch(`${baseUrl}/api/v1/agent/search-answer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2389,11 +2755,11 @@ async function solveQuestionFlow(qNum, doc) {
     
     if (response.ok) {
       const data = await response.json();
-      if (data.answer && data.matchScore >= threshold) {
-        const match = selectOptionByText(data.answer, threshold, d);
+      if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
+        const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
         if (match.success) {
-          logAgentActivity(`[Soal ${qNum}] Attempt 1 Sukses! Skor: ${(data.matchScore * 100).toFixed(0)}% (Dicocokkan: ${(match.score * 100).toFixed(0)}%). Jawaban: ${data.answer}`);
-          return { success: true, mode: 'Fast Text', score: data.matchScore };
+          logAgentActivity(`[Soal ${qNum}] Attempt 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+          return { success: true, mode: 'Cloud Fast Text', score: data.matchScore };
         }
       }
     }
@@ -2406,7 +2772,7 @@ async function solveQuestionFlow(qNum, doc) {
   // ==========================================
   try {
     logAgentActivity(`[Soal ${qNum}] Attempt 1 Gagal/Skor Rendah. Mencoba Fallback 1 (Soal + Opsi)...`);
-    const response = await fetch(`${baseUrl}/api/v1/agent/search-answer`, {
+    const response = await safeFetch(`${baseUrl}/api/v1/agent/search-answer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -2417,11 +2783,11 @@ async function solveQuestionFlow(qNum, doc) {
     
     if (response.ok) {
       const data = await response.json();
-      if (data.answer && data.matchScore >= threshold) {
-        const match = selectOptionByText(data.answer, threshold, d);
+      if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
+        const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
         if (match.success) {
-          logAgentActivity(`[Soal ${qNum}] Fallback 1 Sukses! Skor: ${(data.matchScore * 100).toFixed(0)}% (Dicocokkan: ${(match.score * 100).toFixed(0)}%). Jawaban: ${data.answer}`);
-          return { success: true, mode: 'Refined Text', score: data.matchScore };
+          logAgentActivity(`[Soal ${qNum}] Fallback 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+          return { success: true, mode: 'Cloud Refined Text', score: data.matchScore };
         }
       }
     }
@@ -2430,13 +2796,13 @@ async function solveQuestionFlow(qNum, doc) {
   }
 
   // ==========================================
-  // FALLBACK 2: Math Mode (Screenshot & OCR)
+  // FALLBACK 2: Math Mode (Screenshot & OCR Cloud)
   // ==========================================
-  logAgentActivity(`[Soal ${qNum}] Fallback 1 Gagal/Skor Rendah. Mencoba Fallback 2 (Math Mode Screenshot)...`);
+  logAgentActivity(`[Soal ${qNum}] Fallback 1 Gagal/Skor Rendah. Mencoba Fallback 2 (Cloud Math Mode)...`);
   return await executeFallback2(qNum, baseUrl, apiKey, threshold, d);
 }
 
-// Asynchronous execution of Fallback 2
+// Asynchronous execution of Fallback 2 (mendukung multipart langsung & background proxy fallback)
 async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc) {
   const d = doc || getQuizDocument() || document;
   try {
@@ -2445,29 +2811,52 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc) {
       throw new Error("Gagal memotong tangkapan layar elemen");
     }
 
-    const formData = new FormData();
-    formData.append('image', imageBlob, `question_${qNum}.png`);
+    const endpoint = `${baseUrl}/api/v1/agent/search-answer-image`;
+    let data = null;
 
-    const response = await fetch(`${baseUrl}/api/v1/agent/search-answer-image`, {
-      method: 'POST',
-      headers: {
-        'x-api-key': apiKey
-      },
-      body: formData
-    });
+    try {
+      const formData = new FormData();
+      formData.append('image', imageBlob, `question_${qNum}.png`);
 
-    if (response.ok) {
-      const data = await response.json();
-      if (data.answer) {
-        const match = selectOptionByText(data.answer, 0.60, d);
-        if (match.success) {
-          logAgentActivity(`[Soal ${qNum}] Fallback 2 (Math Mode) Sukses! Skor Match: ${(data.matchScore * 100).toFixed(0)}%. Jawaban: ${data.answer}`);
-          return { success: true, mode: 'Math OCR', score: data.matchScore };
-        }
+      const response = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey },
+        body: formData
+      });
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`API returned status ${response.status}: ${errText}`);
       }
-    } else {
-      const errText = await response.text();
-      throw new Error(`API returned status ${response.status}: ${errText}`);
+      data = await response.json();
+    } catch (directErr) {
+      // Fallback via background.js multipart proxy jika CSP/CORS memblokir tab fetch
+      const base64Img = await blobToBase64(imageBlob);
+      const proxyResp = await new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({
+          action: 'proxyFetch',
+          url: endpoint,
+          options: { method: 'POST', headers: { 'x-api-key': apiKey } },
+          multipart: {
+            files: [{ field: 'image', filename: `question_${qNum}.png`, mimeType: 'image/png', base64: base64Img }]
+          }
+        }, (resp) => {
+          if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+          if (!resp || !resp.success) return reject(new Error(resp?.error || directErr.message));
+          resolve(resp);
+        });
+      });
+      if (!proxyResp.ok) {
+        throw new Error(`API returned status ${proxyResp.status}: ${String(proxyResp.data || '').slice(0, 200)}`);
+      }
+      data = JSON.parse(proxyResp.data);
+    }
+
+    if (data && (data.answer || data.choice)) {
+      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, 0.60, d);
+      if (match.success) {
+        logAgentActivity(`[Soal ${qNum}] Fallback 2 (Cloud Math Mode) Sukses! Skor Match: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+        return { success: true, mode: 'Cloud Math OCR', score: data.matchScore };
+      }
     }
   } catch (err) {
     logAgentActivity(`❌ [Soal ${qNum}] Fallback 2 Gagal: ${err.message}`);

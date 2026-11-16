@@ -109,7 +109,7 @@ document.addEventListener('DOMContentLoaded', () => {
         else if (rawProvider === 'custom') label = res.aiCustomModel || 'Custom AI';
         engineInfo.textContent = `${label}${ocrSuffix}`;
       } else {
-        engineInfo.textContent = `Backend Lokal${ocrSuffix}`;
+        engineInfo.textContent = `Kamus Mini Cloud${ocrSuffix}`;
       }
     });
   }
@@ -192,7 +192,7 @@ document.addEventListener('DOMContentLoaded', () => {
     manualResult.style.display = 'block';
     manualResult.textContent = 'Mencari...';
 
-    const config = await new Promise(r => chrome.storage.local.get(['solverEngine', 'aiProvider', 'aiApiKey', 'aiModel', 'baseUrl'], r));
+    const config = await new Promise(r => chrome.storage.local.get(['solverEngine', 'aiProvider', 'aiApiKey', 'aiModel', 'apiKey'], r));
     const engine = config.solverEngine || 'direct_ai';
 
     try {
@@ -222,14 +222,16 @@ document.addEventListener('DOMContentLoaded', () => {
           manualResult.textContent = 'Gunakan Gemini untuk hasil terbaik pada pencarian cepat.';
         }
       } else {
-        const baseUrl = (config.baseUrl || 'http://localhost:3000').replace(/\/$/, '');
+        const baseUrl = 'https://mylms.melvino.online';
+        const headers = { 'Content-Type': 'application/json' };
+        if (config.apiKey) headers['x-api-key'] = config.apiKey;
         const res = await fetch(`${baseUrl}/api/search`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ query: query })
         });
         const data = await res.json();
-        manualResult.textContent = data.jawaban || 'Tidak ditemukan di database.';
+        manualResult.textContent = data.jawaban || data.answer || 'Tidak ditemukan di database.';
       }
     } catch (err) {
       manualResult.textContent = `Gagal: ${err.message}`;
