@@ -36,6 +36,8 @@ Dokumen ini berisi konteks teknis, arsitektur sistem, skema penyimpanan data, pe
 
 ## 3. Skema Penyimpanan (`chrome.storage.local`)
 
+- `selectedModelId?: string` — UUID katalog model AI cloud (v2) yang dipilih akun; dikirim sebagai `modelId` pada semua lookup (`/api/search`, `/api/v1/agent/search-answer`, `search-answer-image`). Kosong → server pakai preferensi akun.
+
 ```typescript
 interface ExtensionStorage {
   // Pilihan Mesin
@@ -62,6 +64,7 @@ interface ExtensionStorage {
   navigationMode: 'semi_auto' | 'full_auto';    // Default: 'semi_auto' (Auto-Solve, Manual Next)
   baselineDelay: number;                        // Jeda dasar sebelum next page pada Full-Auto (detik, default: 3)
   matchThreshold: number;                       // Ambang batas kemiripan (default: 0.70 - 0.75)
+  selectedModelId?: string; // v2: UUID model AI cloud terpilih (kosong = pakai preferensi akun server)
 
   // Status AI Agent
   agentState: {
