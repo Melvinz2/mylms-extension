@@ -1,0 +1,62 @@
+name: Package extension
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'extensi/**'
+      - '.github/workflows/package-extension.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read manifest version
+        id: meta
+        run: |
+          VERSION=$(node -p "require('./extensi/manifest.json').version")
+          if [ -z "$VERSION" ]; then echo "manifest version missing" >&2; exit 1; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Validate manifest & core files
+        run: |
+          node -e "const m=require('./extensi/manifest.json'); if(m.manifest_version!==3) throw new Error('manifest_version must be 3'); if(!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(m.version)) throw new Error('semver required: '+m.version)"
+          test -f extensi/background.js
+          test -f extensi/options.html
+          test -f extensi/popup.html
+
+      - name: Build zip and checksum
+        id: sha
+        run: |
+          cd extensi
+          ZIP="../kamus-mini-${{ steps.meta.outputs.version }}.zip"
+          zip -rq "$ZIP" . -x '.*' -x '__MACOSX/*'
+          cd ..
+          SHA=$(sha256sum "kamus-mini-${{ steps.meta.outputs.version }}.zip" | cut -d' ' -f1)
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          echo "SHA256=$SHA" >> "$GITHUB_ENV"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="v$VERSION"
+          ZIP="kamus-mini-$VERSION.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG exists — uploading asset."
+            gh release upload "$TAG" "$ZIP" --clobber
+          else
+            echo "Creating release $TAG"
+            gh release create "$TAG" \
+              --title "Kamus Mini $VERSION" \
+              --notes "Ekstensi $VERSION · sha256 ${SHA256}" \
+              "$ZIP"
+          fi

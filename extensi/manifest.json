@@ -4,6 +4,7 @@
   "version": "1.2",
   "description": "Cari kunci jawaban dari bank soal secara instan dengan blok teks dan klik kanan, atau selesaikan kuis otomatis dengan Direct AI.",
   "permissions": [
+    "alarms",
     "contextMenus",
     "activeTab",
     "scripting",

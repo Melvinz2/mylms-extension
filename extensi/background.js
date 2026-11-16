@@ -1,3 +1,5 @@
+importScripts('shared/update-check.js')
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "cariJawaban",
