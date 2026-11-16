@@ -66,6 +66,9 @@ document.addEventListener('DOMContentLoaded', () => {
   const btnToggleCloudApiKey = document.getElementById('btnToggleCloudApiKey');
   const btnTestCloudConnection = document.getElementById('btnTestCloudConnection');
   const cloudTestFeedback = document.getElementById('cloudTestFeedback');
+  const cloudModelSelect = document.getElementById('cloudModelSelect');
+  const btnRefreshCloudModels = document.getElementById('btnRefreshCloudModels');
+  const cloudModelFeedback = document.getElementById('cloudModelFeedback');
 
   const CLOUD_ENDPOINT = 'https://mylms.melvino.online';
 
@@ -185,6 +188,62 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   });
 
+  function renderModelOptions(models, selectedModelId) {
+    cloudModelSelect.innerHTML = '';
+    if (!models.length) {
+      cloudModelSelect.appendChild(new Option('Tidak ada model tersedia', ''));
+      return;
+    }
+    const known = models.some(m => m.id === selectedModelId);
+    if (selectedModelId && !known) {
+      const opt = new Option('(Model sebelumnya tidak tersedia)', selectedModelId);
+      cloudModelSelect.appendChild(opt); // pertahankan ID, JANGAN pilih entri lain diam-diam
+    }
+    models.forEach(m => {
+      const label = `${m.displayName}${m.supportsImages ? ' • gambar' : ''}${m.isDefault ? ' • default' : ''}`;
+      cloudModelSelect.appendChild(new Option(label, m.id));
+    });
+    cloudModelSelect.value = known ? selectedModelId : (selectedModelId || models.find(m => m.isDefault)?.id || '');
+  }
+
+  async function loadCloudModels(saveAfter = false) {
+    const apiKey = backendApiKeyInput.value.trim();
+    if (!apiKey) {
+      cloudModelFeedback.className = 'test-feedback error';
+      cloudModelFeedback.textContent = 'Isi API Key Cloud dulu untuk memuat daftar model.';
+      cloudModelFeedback.style.display = 'block';
+      return;
+    }
+    cloudModelFeedback.className = 'test-feedback';
+    cloudModelFeedback.textContent = 'Memuat katalog model...';
+    cloudModelFeedback.style.display = 'block';
+    try {
+      const data = await KamusMiniCloud.getAvailableModels(apiKey);
+      renderModelOptions(data.models, data.selectedModelId || cloudModelSelect.value || null);
+      cloudModelFeedback.className = 'test-feedback success';
+      cloudModelFeedback.textContent = `${data.models.length} model tersedia.`;
+      if (saveAfter) saveSettings(false);
+    } catch (err) {
+      cloudModelFeedback.className = 'test-feedback error';
+      cloudModelFeedback.textContent = `Gagal memuat model: ${err.message}`;
+    }
+  }
+
+  btnRefreshCloudModels.addEventListener('click', () => loadCloudModels(false));
+  cloudModelSelect.addEventListener('change', async () => {
+    const apiKey = backendApiKeyInput.value.trim();
+    if (!apiKey || !cloudModelSelect.value) return;
+    try {
+      await KamusMiniCloud.saveModelPreference(apiKey, cloudModelSelect.value);
+      chrome.storage.local.set({ selectedModelId: cloudModelSelect.value });
+      cloudModelFeedback.className = 'test-feedback success';
+      cloudModelFeedback.textContent = 'Model pilihan disimpan ke akun.';
+    } catch (err) {
+      cloudModelFeedback.className = 'test-feedback error';
+      cloudModelFeedback.textContent = `Gagal simpan preferensi: ${err.message}`;
+    }
+  });
+
   // Load existing configuration from chrome.storage.local
   chrome.storage.local.get([
     'solverEngine',
@@ -201,6 +260,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'baselineDelay',
     'matchThreshold',
     'navigationMode',
+    'selectedModelId',
     'uiTheme'
   ], (res) => {
     const engine = res.solverEngine || 'direct_ai';
@@ -226,6 +286,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const currentThemePref = res.uiTheme || (window.KamusMiniTheme ? window.KamusMiniTheme.getPreference() : 'auto');
     updateThemeUI(currentThemePref);
+
+    cloudModelSelect.value = res.selectedModelId || '';
+    if (currentEngine === 'cloud' && (res.apiKey || '').trim()) loadCloudModels(false);
   });
 
   // Save Settings
@@ -248,7 +311,8 @@ document.addEventListener('DOMContentLoaded', () => {
       baselineDelay: parseFloat(baselineDelayInput.value) || 3,
       matchThreshold: parseInt(matchThresholdInput.value, 10) || 75,
       navigationMode: navigationModeSelect.value || 'semi_auto',
-      uiTheme: chosenTheme
+      uiTheme: chosenTheme,
+      selectedModelId: cloudModelSelect.value || null
     };
 
     chrome.storage.local.set(config, () => {
@@ -273,6 +337,8 @@ document.addEventListener('DOMContentLoaded', () => {
       populateModels('gemini', 'gemini-1.5-flash');
       aiApiKeyInput.value = '';
       if (backendApiKeyInput) backendApiKeyInput.value = '';
+      cloudModelSelect.value = '';
+      chrome.storage.local.remove('selectedModelId');
       if (ocrEnabledInput) ocrEnabledInput.checked = true;
       if (paddleOcrTokenInput) paddleOcrTokenInput.value = '';
       if (paddleOcrModelInput) paddleOcrModelInput.value = 'PaddleOCR-VL-1.6';

@@ -577,6 +577,18 @@
               </button>
             </div>
           </div>
+          <div class="form-group field" style="margin-top: var(--s-2);">
+            <label for="cloudModelSelect" class="form-label">Model AI Cloud (Kamus Mini)</label>
+            <div class="input-row">
+              <select id="cloudModelSelect" style="flex:1;">
+                <option value="">— Memuat model... —</option>
+              </select>
+              <button type="button" class="icon-btn" id="btnRefreshCloudModels" aria-label="Muat ulang model" title="Muat ulang">
+                <svg viewBox="0 0 24 24"><path d="M23 4v6h-6M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg>
+              </button>
+            </div>
+            <div class="test-feedback" id="cloudModelFeedback"></div>
+          </div>
           <div class="form-group" style="margin-top: var(--s-2);">
             <div>
               <button type="button" class="btn btn--secondary btn--sm" id="btnTestCloudConnection">Tes Koneksi Cloud</button>
@@ -694,6 +706,7 @@
   </div>
 
   <script src="ocr.js"></script>
+  <script src="ai-cloud-client.js"></script>
   <script src="options.js"></script>
 </body>
 </html>
