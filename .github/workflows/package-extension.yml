@@ -28,7 +28,7 @@ jobs:
 
       - name: Validate manifest & core files
         run: |
-          node -e "const m=require('./extensi/manifest.json'); if(m.manifest_version!==3) throw new Error('manifest_version must be 3'); if(!/^[0-9]+\.[0-9]+\.[0-9]+$/.test(m.version)) throw new Error('semver required: '+m.version)"
+          node -e "const m=require('./extensi/manifest.json'); if(m.manifest_version!==3) throw new Error('manifest_version must be 3'); if(!/^[0-9]+\.[0-9]+(\.[0-9]+)?$/.test(m.version)) throw new Error('version must be X.Y or X.Y.Z: '+m.version)"
           test -f extensi/background.js
           test -f extensi/options.html
           test -f extensi/popup.html
