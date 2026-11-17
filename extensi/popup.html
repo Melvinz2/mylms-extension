@@ -25,7 +25,8 @@
     }
 
     #usagePanel h2 { margin: 0; font-size: 13px; }
-    #usageReadout { margin: 6px 0 0; font-size: 12px; white-space: pre-line; }
+    #usageReadout { margin: 12px 0; font-size: 12px; }
+    .quota-toggle {display:flex;gap:8px;align-items:center;font-size:11px;color:var(--p-muted)}
 
     /* Header */
     .popup-header {
@@ -210,7 +211,8 @@
 
   <section id="usagePanel" aria-labelledby="usageTitle" hidden>
     <h2 id="usageTitle">Kuota Kamus Mini Cloud</h2>
-    <p id="usageReadout" role="status"></p>
+    <div id="usageReadout" role="status"></div>
+    <label class="quota-toggle"><input type="checkbox" id="quotaOverlayToggle"> Overlay kuota di halaman kuis</label>
     <button type="button" id="btnUsageRetry" class="btn btn--secondary btn--sm" hidden>Coba lagi</button>
   </section>
 
@@ -257,6 +259,7 @@
 
   <script src="ai-cloud-client.js"></script>
   <script src="popup.js"></script>
+  <script src="shared/quota-view.js"></script>
   <script src="popup-usage.js"></script>
 </body>
 </html>

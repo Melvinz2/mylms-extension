@@ -1,56 +1,33 @@
 'use strict';
-
 (() => {
   const button = document.getElementById('btnUsage');
   const panel = document.getElementById('usagePanel');
   const readout = document.getElementById('usageReadout');
   const retry = document.getElementById('btnUsageRetry');
-  const number = new Intl.NumberFormat('id-ID');
-  let generation = 0;
-  let timer;
-
-  const count = value => value == null ? 'Tanpa batas' : number.format(value);
-
-  async function refresh(showLoading = false) {
-    const current = ++generation;
-    clearTimeout(timer);
-    retry.hidden = true;
-    if (showLoading) readout.textContent = 'Memuat penggunaan…';
-    try {
-      const { apiKey } = await chrome.storage.local.get('apiKey');
-      if (panel.hidden || current !== generation) return;
-      if (!apiKey?.trim()) {
-        readout.textContent = 'Belum terhubung. Atur API key Cloud di Pengaturan.';
-        return;
-      }
-      const data = await KamusMiniCloud.getMyAiUsage(apiKey.trim());
-      if (panel.hidden || current !== generation) return;
-      const { quota } = data;
-      const lines = [
-        `Tersedia: ${count(data.remainingThisMinute)} dari ${count(data.requestsPerMinute)} per menit`,
-        `Diproses: ${count(data.activeRequests)} dari maksimal ${count(data.concurrentLimit)} sekaligus`,
-        `Kuota akun: ${count(quota.remainingRequests)} permintaan · ${count(quota.remainingTokens)} token`,
-      ];
-      if (quota.nextResetAt) lines.push(`Reset ${new Date(quota.nextResetAt).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB`);
-      const next = lines.join('\n');
-      if (readout.textContent !== next) readout.textContent = next;
-      timer = setTimeout(refresh, 10000);
-    } catch {
-      if (panel.hidden || current !== generation) return;
-      readout.textContent = 'Gagal memuat penggunaan AI.';
-      retry.hidden = false;
-    }
+  const toggle = document.getElementById('quotaOverlayToggle');
+  let port = null;
+  let lastState;
+  function open() {
+    if (port) return;
+    KamusQuotaView.render(readout, {status:'loading'});
+    port = chrome.runtime.connect({name:'kamus-usage'});
+    port.onMessage.addListener(state => {
+      lastState = state;
+      KamusQuotaView.render(readout, state);
+      retry.hidden = !['error','disconnected'].includes(state.status);
+      retry.textContent = state.status === 'disconnected' ? 'Hubungkan Cloud' : 'Coba lagi';
+    });
+    port.onDisconnect.addListener(() => { port = null; if (!panel.hidden) { retry.hidden = false; } });
   }
-
   button.addEventListener('click', () => {
     panel.hidden = !panel.hidden;
     button.setAttribute('aria-expanded', String(!panel.hidden));
-    if (panel.hidden) {
-      ++generation;
-      clearTimeout(timer);
-    } else {
-      void refresh(true);
-    }
+    if (panel.hidden) { const previous = port; port = null; previous?.disconnect(); }
+    else open();
   });
-  retry.addEventListener('click', () => void refresh(true));
+  retry.addEventListener('click', () => { if(lastState?.status === 'disconnected'){chrome.runtime.openOptionsPage();return;} if (port) port.postMessage({action:'refresh'}); else open(); });
+  toggle.addEventListener('change', () => chrome.storage.local.set({quotaOverlayEnabled:toggle.checked}));
+  chrome.storage.local.get(['quotaOverlayEnabled'], state => { toggle.checked = state.quotaOverlayEnabled === true; });
+  chrome.storage.onChanged.addListener((changes, area) => { if (area === 'local' && changes.quotaOverlayEnabled) toggle.checked = changes.quotaOverlayEnabled.newValue === true; });
+  window.addEventListener('pagehide', () => { port?.disconnect(); port = null; });
 })();

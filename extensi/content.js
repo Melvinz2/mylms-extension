@@ -1422,6 +1422,7 @@ async function captureFormulationElement(scopeOrDoc, diagOut = null) {
   };
 
   let didStitchScroll = false;
+  globalThis.KamusQuotaOverlay?.beginCapture();
   try {
     // Tunggu sejenak jika masih ada gambar soal/opsi yang belum selesai dimuat (misal dari Service Worker ReplayWeb)
     diag.imgStats = await waitForElementImages(element, 1200);
@@ -1638,6 +1639,7 @@ async function captureFormulationElement(scopeOrDoc, diagOut = null) {
     console.warn("captureFormulationElement error:", err);
     return null;
   } finally {
+    globalThis.KamusQuotaOverlay?.endCapture();
     restoreHiddenOverlays(hiddenOverlays);
     try {
       if (didStitchScroll) {

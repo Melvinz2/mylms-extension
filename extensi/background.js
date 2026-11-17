@@ -1,5 +1,26 @@
 importScripts('shared/update-check.js')
 importScripts('shared/question-log-store.js')
+importScripts('shared/usage-store.js')
+
+const usageStore = KamusUsageStore.create({
+  storage: chrome.storage.local,
+  fetchUsage: async apiKey => {
+    const response = await fetch('https://mylms.melvino.online/api/v1/agent/my-ai-usage', {
+      headers: { 'x-api-key': apiKey, 'X-AI-Client-Version': '2' },
+      cache: 'no-store',
+    });
+    if (!response.ok) throw new Error('Usage unavailable');
+    const result = await response.json();
+    if (!result.success || !result.data) throw new Error('Usage unavailable');
+    return result.data;
+  },
+});
+chrome.runtime.onConnect.addListener(port => {
+  if (port.sender?.id === chrome.runtime.id) usageStore.connect(port);
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && changes.apiKey) usageStore.invalidate(true);
+});
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
@@ -134,6 +155,16 @@ function buildProxyFetchInit(request) {
 
 // Listener untuk aksi-aksi khusus dari Content Script (seperti Tangkapan Layar & Proxy Fetch)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'openOptions') {
+    if (sender.id === chrome.runtime.id) chrome.runtime.openOptionsPage();
+    sendResponse({ success: sender.id === chrome.runtime.id });
+    return false;
+  }
+  if (request.action === 'quotaUsageInvalidate') {
+    if (sender.id === chrome.runtime.id) usageStore.invalidate();
+    sendResponse({ success: sender.id === chrome.runtime.id });
+    return false;
+  }
   if (request.action === 'questionLogWrite') {
     if (sender.id !== chrome.runtime.id) { sendResponse({success:false}); return; }
     KamusQuestionLogStore.write(request).then(() => sendResponse({success:true}));

@@ -66,6 +66,6 @@ jobs:
             echo "Creating release $TAG"
             gh release create "$TAG" \
               --title "Kamus Mini $VERSION" \
-              --notes "$(printf '%s\n' '- Panel Penggunaan AI di popup menampilkan batas per menit, permintaan aktif, dan sisa kuota akun Cloud.' '- Panel mengambil data saat dibuka dan menyediakan tombol coba lagi ketika koneksi gagal.')" \
+              --notes "$(printf '%s\n' '- Tracker kuota visual memakai bar untuk jatah permintaan, slot aktif, dan kuota akun Cloud.' '- Overlay kuota khusus halaman kuis dapat diaktifkan, diminimalkan, dan digeser. Posisi terakhir disimpan.' '- Popup dan overlay berbagi data penggunaan, dengan status data terakhir saat jaringan terganggu.')" \
               "$ZIP" "$ZIP.sha256"
           fi

@@ -15,7 +15,8 @@ function context(extra) { return vm.createContext({ console, setTimeout, clearTi
 async function capture(activeId, duringCapture = noop) {
   let listener, activated, removed = false, captures = 0;
   const c = context({ importScripts: noop, chrome: {
-    runtime: { id: 'test', onInstalled: { addListener: noop }, onMessage: { addListener: f => listener = f } },
+    runtime: { id: 'test', onConnect: {addListener: noop}, onInstalled: { addListener: noop }, onMessage: { addListener: f => listener = f } },
+    storage: {local: {get: async()=>({})}, onChanged: {addListener:noop}},
     contextMenus: { onClicked: { addListener: noop } },
     tabs: {
       onActivated: { addListener: f => activated = f, removeListener: () => removed = true },
@@ -23,6 +24,7 @@ async function capture(activeId, duringCapture = noop) {
       captureVisibleTab: async () => { captures++; duringCapture(activated); return 'data:image/png;base64,test'; }
     }
   }});
+  vm.runInContext(source('shared/usage-store.js'), c);
   vm.runInContext(source('background.js'), c);
   const response = await new Promise(resolve => listener({ action: 'captureVisibleTab' }, { tab: { id: 1, windowId: 5 } }, resolve));
   assert.equal(removed, true);
@@ -288,53 +290,131 @@ test('background log writer serializes frames and bounds previews and stage data
  await store.write({identity:{id:'oversize'},preview:'data:image/jpeg;base64,'+'A'.repeat(200*1024)}); assert.equal(state.questionPreviews.length,5); assert.ok(!state.questionPreviews.some(p=>p.id==='oversize'));
 });
 
-function usagePopup({ key, data, error }) {
-  const elements = new Map(['btnUsage', 'usagePanel', 'usageReadout', 'btnUsageRetry'].map(id => [id, {
-    hidden: true,
-    textContent: '',
-    addEventListener(_event, callback) { this.click = callback; },
-    setAttribute(_attribute, value) { this.expanded = value; },
-  }]));
-  const timers = new Map();
-  let calls = 0;
-  let nextTimer = 0;
-  vm.runInContext(source('popup-usage.js'), context({
-    document: { getElementById: id => elements.get(id) },
-    chrome: { storage: { local: { get: async () => ({ apiKey: key }) } } },
-    KamusMiniCloud: { getMyAiUsage: async () => { calls++; if (error) throw error; return data; } },
-    setTimeout(callback) { timers.set(++nextTimer, callback); return nextTimer; },
-    clearTimeout(id) { timers.delete(id); },
-  }));
-  return { elements, timers, get calls() { return calls; } };
+// The renderer is exercised through DOM state, including accessibility values.
+function quotaViewFixture() {
+  const doc = { createElement(tag) {
+    return { tag, ownerDocument: doc, children: [], attributes: {}, style: {}, textContent: '',
+      append(...nodes) { this.children.push(...nodes); },
+      replaceChildren(...nodes) { this.children = nodes; },
+      setAttribute(name, value) { this.attributes[name] = value; } };
+  } };
+  const c = context({ self: {} }); vm.runInContext(source('shared/quota-view.js'),c);
+  const root = doc.createElement('div');
+  const all = () => { const found=[]; const visit = n => {found.push(n);n.children.forEach(visit)};visit(root);return found; };
+  return { render: state => c.self.KamusQuotaView.render(root,state), all,
+    text: () => all().map(n=>n.textContent).join(' '), bars: () => all().filter(n=>n.attributes.role==='progressbar') };
 }
 
-test('usage tracker fetches only while open and preserves zero and unlimited quotas', async () => {
-  const popup = usagePopup({ key: 'cloud-key', data: { remainingThisMinute: 0, requestsPerMinute: 20,
-    activeRequests: 0, concurrentLimit: 2, quota: { remainingRequests: null, remainingTokens: 0, nextResetAt: '2026-11-17T17:00:00Z' } } });
-  const open = popup.elements.get('btnUsage');
-  assert.equal(popup.calls, 0);
-  open.click();
-  await new Promise(setImmediate);
-  assert.equal(popup.calls, 1);
-  assert.match(popup.elements.get('usageReadout').textContent, /0 dari 20.*\n.*0 dari maksimal 2.*\n.*Tanpa batas permintaan.*0 token.*\n.*WIB/);
-  assert.equal(popup.timers.size, 1);
-  open.click();
-  assert.equal(popup.timers.size, 0);
-  assert.equal(open.expanded, 'false');
+test('quota bars use remaining allowance and occupied processing slots with accessible values', () => {
+ const f=quotaViewFixture(); f.render({data:{remainingThisMinute:15,requestsPerMinute:20,activeRequests:1,concurrentLimit:2,quota:{remainingRequests:40,effectiveMaxRequests:50,remainingTokens:0,effectiveMaxTokens:10000}}});
+ const bars=f.bars();assert.equal(bars.length,4);
+ assert.deepEqual(bars.map(b=>b.attributes['aria-valuenow']),['15','1','40','0']);
+ assert.deepEqual(bars.map(b=>b.children[0].style.width),['75%','50%','80%','0%']);
+ assert.match(f.text(),/15\/20 tersedia/);assert.match(f.text(),/1\/2 aktif/);
 });
 
-test('usage tracker reports missing keys and offers retry after network failure', async () => {
-  const disconnected = usagePopup({});
-  disconnected.elements.get('btnUsage').click();
-  await new Promise(setImmediate);
-  assert.match(disconnected.elements.get('usageReadout').textContent, /Belum terhubung/);
-  assert.equal(disconnected.calls, 0);
-  const offline = usagePopup({ key: 'cloud-key', error: new Error('offline') });
-  offline.elements.get('btnUsage').click();
-  await new Promise(setImmediate);
-  const retry = offline.elements.get('btnUsageRetry');
-  assert.equal(retry.hidden, false);
-  retry.click();
-  await new Promise(setImmediate);
-  assert.equal(offline.calls, 2);
+test('quota renderer preserves unlimited, stale and disconnected states without fake account bars', () => {
+ const f=quotaViewFixture();f.render({stale:true,data:{remainingThisMinute:0,requestsPerMinute:20,activeRequests:0,concurrentLimit:2,quota:{remainingRequests:null,remainingTokens:null}}});
+ assert.equal(f.bars().length,2);assert.match(f.text(),/Kuota akun tanpa batas/);assert.match(f.text(),/Data terakhir/);
+ f.render({status:'disconnected'});assert.equal(f.bars().length,0);assert.match(f.text(),/Hubungkan Cloud/);
+ f.render({status:'error'});assert.match(f.text(),/belum dapat dimuat/);
+});
+
+test('quota bar widths clamp out-of-window values and reset text handles invalid dates', () => {
+ const f=quotaViewFixture();f.render({data:{remainingThisMinute:25,requestsPerMinute:20,activeRequests:-1,concurrentLimit:2,quota:{remainingRequests:null,remainingTokens:null,nextResetAt:'invalid'}}});
+ assert.deepEqual(f.bars().map(b=>b.children[0].style.width),['100%','0%']);
+ assert.ok(!f.text().includes('NaN'));
+});
+
+
+function usageStoreFixture(fetchUsage) {
+ let key='fixture-key', time=1000, nextTimer=0;
+ const timers=new Map(); const c=context({});
+ vm.runInContext(source('shared/usage-store.js'),c);
+ const store=c.KamusUsageStore.create({storage:{get:async()=>({apiKey:key})},fetchUsage,now:()=>time,
+   schedule:(fn,delay)=>{const id=++nextTimer;timers.set(id,{fn,delay});return id},cancel:id=>timers.delete(id)});
+ function port(){let disconnect, receive;const snapshots=[];return {name:'kamus-usage',snapshots,onMessage:{addListener:f=>receive=f},onDisconnect:{addListener:f=>disconnect=f},postMessage:state=>snapshots.push(structuredClone(state)),close:()=>disconnect(),refresh:()=>receive({action:'refresh'})};}
+ return {store,timers,port,setKey:v=>key=v,setTime:v=>time=v};
+}
+
+test('shared quota cache deduplicates active consumers and stops polling when all close', async()=>{
+ let calls=0,resolveFetch;const pending=new Promise(resolve=>resolveFetch=resolve);
+ const f=usageStoreFixture(async()=>{calls++;return pending}); const popup=f.port(),overlay=f.port();
+ f.store.connect(popup);f.store.connect(overlay);await new Promise(setImmediate);assert.equal(calls,1);
+ resolveFetch({remainingThisMinute:20});await new Promise(setImmediate);
+ assert.equal(popup.snapshots.at(-1).data.remainingThisMinute,20);assert.equal(overlay.snapshots.at(-1).status,'ready');assert.equal(f.timers.size,1);
+ popup.close();assert.equal(f.timers.size,1);overlay.close();assert.equal(f.timers.size,0);
+ f.store.invalidate();await new Promise(setImmediate);assert.equal(calls,1);assert.equal(f.timers.size,0);
+ const reopened=f.port();f.store.connect(reopened);await new Promise(setImmediate);assert.equal(calls,2);
+ reopened.close();
+});
+
+test('shared quota cache preserves last data on failure and retries without duplicate polling', async()=>{
+ let calls=0;const f=usageStoreFixture(async()=>{if(++calls===2)throw Error('offline');return {remainingThisMinute:20-calls}});const port=f.port();f.store.connect(port);await new Promise(setImmediate);
+ port.refresh();await new Promise(setImmediate);const last=port.snapshots.at(-1);assert.equal(last.status,'error');assert.equal(last.stale,true);assert.equal(last.data.remainingThisMinute,19);assert.equal(f.timers.size,1);
+ port.refresh();await new Promise(setImmediate);assert.equal(port.snapshots.at(-1).status,'ready');assert.equal(port.snapshots.at(-1).stale,false);assert.equal(f.timers.size,1);port.close();
+});
+
+test('changing a Cloud key discards late old-account usage and clears private cached data', async()=>{
+ let resolveOld;const old=new Promise(resolve=>resolveOld=resolve);const keys=[];
+ const f=usageStoreFixture(async key=>{keys.push(key);return key==='fixture-key'?old:{remainingThisMinute:7}});const port=f.port();f.store.connect(port);await new Promise(setImmediate);
+ f.setKey('new-key');f.store.invalidate(true);await new Promise(setImmediate);assert.equal(port.snapshots.at(-1).data.remainingThisMinute,7);
+ resolveOld({remainingThisMinute:99});await new Promise(setImmediate);assert.equal(port.snapshots.at(-1).data.remainingThisMinute,7);assert.deepEqual(keys,['fixture-key','new-key']);
+ f.setKey('');f.store.invalidate(true);await new Promise(setImmediate);assert.equal(port.snapshots.at(-1).status,'disconnected');assert.equal(port.snapshots.at(-1).data,null);port.close();
+});
+
+
+function quotaOverlayFixture({enabled=true,quiz=true}={}) {
+ const created=[],events={};let connections=0,disconnects=0,storageListener;
+ const state={quotaOverlayEnabled:enabled,uiTheme:'dark'};
+ const doc={readyState:'complete',visibilityState:'visible',addEventListener:(name,f)=>events[name]=f,createElement(tag){
+  const el={tag,children:[],style:{},attributes:{},className:'',classList:{add:noop,toggle:noop},append(...nodes){this.children.push(...nodes)},remove(){this.removed=true},setAttribute(k,v){this.attributes[k]=v},attachShadow(){this.shadow={children:[],append(...n){this.children.push(...n)}};return this.shadow},setPointerCapture:noop,getBoundingClientRect(){return{width:290,height:200,left:parseFloat(this.style.left)||0,top:parseFloat(this.style.top)||0}}};created.push(el);return el;
+ }};doc.documentElement=doc.createElement('html');
+ const c=context({setInterval:()=>1,clearInterval:noop,document:doc,innerWidth:1000,innerHeight:800,matchMedia:()=>({matches:false}),MutationObserver:class{observe(){}disconnect(){}},KamusQuotaView:{render:noop},chrome:{storage:{local:{get:(_k,cb)=>cb(state),set:patch=>Object.assign(state,patch)},onChanged:{addListener:f=>storageListener=f}},runtime:{connect:()=>{connections++;let disconnected;return{onMessage:{addListener:noop},onDisconnect:{addListener:f=>disconnected=f},postMessage:noop,disconnect(){disconnects++;disconnected?.()}}}}}});
+ c.window=c;c.addEventListener=(name,f)=>events[name]=f;c.getQuizDocument=()=>quiz?{}:null;
+ vm.runInContext(source('quota-overlay.js'),c);
+ return{c,doc,events,created,state,enable(v){storageListener({quotaOverlayEnabled:{newValue:v}},'local')},get connections(){return connections},get disconnects(){return disconnects},host:()=>created.find(e=>e.id==='kamus-mini-quota-overlay'&&!e.removed)};
+}
+
+test('quiz overlay is off by default and never subscribes on non-quiz pages',()=>{
+ const disabled=quotaOverlayFixture({enabled:false});assert.equal(disabled.connections,0);assert.equal(disabled.host(),undefined);
+ const ordinary=quotaOverlayFixture({quiz:false});assert.equal(ordinary.connections,0);assert.equal(ordinary.host(),undefined);
+ const quiz=quotaOverlayFixture();assert.equal(quiz.connections,1);assert.ok(quiz.host());quiz.enable(false);assert.equal(quiz.disconnects,1);assert.equal(quiz.host(),undefined);
+});
+
+test('quiz overlay capture visibility restores only after all captures end',()=>{
+ const f=quotaOverlayFixture();const api=f.c.KamusQuotaOverlay;const host=f.host();
+ api.beginCapture();api.beginCapture();assert.equal(host.style.visibility,'hidden');api.endCapture();assert.equal(host.style.visibility,'hidden');api.endCapture();assert.equal(host.style.visibility,'visible');api.endCapture();assert.equal(host.style.visibility,'visible');
+ const result=api.clampPosition(-100,1000,290,200,390,600);assert.equal(result.x,8);assert.equal(result.y,392);
+});
+
+test('quiz overlay saves clamped drag position and disconnects when minimized or hidden',()=>{
+ const f=quotaOverlayFixture();const header=f.created.find(e=>e.tag==='header');const collapse=f.created.find(e=>e.attributes['aria-label']==='Minimalkan tracker');
+ header.onpointerdown({target:{closest:()=>null},button:0,pointerId:1,clientX:700,clientY:600,preventDefault:noop});
+ header.onpointermove({pointerId:1,clientX:-100,clientY:2000});header.onpointerup();assert.equal(f.state.quotaOverlayPosition.x,8);assert.equal(f.state.quotaOverlayPosition.y,592);
+ collapse.onclick();assert.equal(f.disconnects,1);assert.equal(f.state.quotaOverlayMinimized,true);collapse.onclick();assert.equal(f.connections,2);
+ f.doc.visibilityState='hidden';f.events.visibilitychange();assert.equal(f.disconnects,2);assert.equal(f.host(),undefined);
+});
+
+
+test('AI completions during usage fetch coalesce into one refresh after the pending request',async()=>{
+ let calls=0,finish;const pending=new Promise(resolve=>finish=resolve);const f=usageStoreFixture(async()=>{calls++;return calls===1?pending:{remainingThisMinute:18}});const port=f.port();f.store.connect(port);await new Promise(setImmediate);
+ f.store.invalidate();f.store.invalidate();f.store.invalidate();assert.equal(calls,1);
+ finish({remainingThisMinute:20});await new Promise(setImmediate);assert.equal(calls,2);assert.equal(port.snapshots.at(-1).data.remainingThisMinute,18);assert.equal(f.timers.size,1);port.close();
+});
+
+test('closing quota views before storage resolves prevents an unnecessary network request',async()=>{
+ let resolveStorage,calls=0,disconnect;const stored=new Promise(resolve=>resolveStorage=resolve);const c=context({});vm.runInContext(source('shared/usage-store.js'),c);
+ const store=c.KamusUsageStore.create({storage:{get:()=>stored},fetchUsage:async()=>{calls++;return{}},schedule:()=>0,cancel:noop});
+ store.connect({name:'kamus-usage',postMessage:noop,onMessage:{addListener:noop},onDisconnect:{addListener:f=>disconnect=f}});disconnect();resolveStorage({apiKey:'key'});await new Promise(setImmediate);assert.equal(calls,0);
+});
+
+
+test('failed question capture restores quota overlay visibility through finally',async()=>{
+ let hidden=false,restored=0;
+ const element={classList:{contains:()=>true},querySelector:()=>null};const doc={defaultView:{}};
+ const win={location:{href:'https://quiz.invalid'},innerWidth:1000,innerHeight:800};win.top=win;
+ const c=context({console:{warn:noop},window:win,document:doc,resolveQuizDocAndScope:()=>({doc,scope:element}),detectQuizInputType:()=> 'choice',getScrollContainer:()=>null,waitForElementImages:async()=>{assert.equal(hidden,true);throw Error('capture fixture failure')},restoreHiddenOverlays:()=>restored++,KamusQuotaOverlay:{beginCapture:()=>hidden=true,endCapture:()=>hidden=false}});
+ vm.runInContext(section('async function captureFormulationElement(', '// ---- CLICK SIMULATOR'),c);
+ const diag={};assert.equal(await c.captureFormulationElement(element,diag),null);assert.equal(hidden,false);assert.equal(restored,1);assert.match(diag.failReason,/capture fixture failure/);
 });

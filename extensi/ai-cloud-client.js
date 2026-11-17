@@ -46,7 +46,13 @@
     } else if (formData !== undefined) {
       init.body = formData; // FormData set Content-Type sendiri (boundary)
     }
-    const res = await impl(CLOUD_URL + path, init);
+    let res;
+    try { res = await impl(CLOUD_URL + path, init); }
+    finally {
+      if (method === 'POST' && ['/api/search', '/api/v1/agent/search-answer', '/api/v1/agent/search-answer-image'].includes(path)) {
+        try { global.chrome?.runtime?.sendMessage({ action: 'quotaUsageInvalidate' }, () => { void global.chrome?.runtime?.lastError; }); } catch (_) {}
+      }
+    }
     let body = null;
     try { body = await res.json(); } catch (_) { /* body non-JSON */ }
     const limit = parseLimitError(res, body);
