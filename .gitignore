@@ -15,6 +15,7 @@ yarn-debug.log*
 
 # Local Backups & Scratch
 extensi_backup_pre_ocr/
+*.zip
 Cuplikan layar*
 example.md
 

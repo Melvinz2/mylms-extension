@@ -124,6 +124,28 @@ let agentLoopTimeout = null;
 let lastObservedQNum = null;
 let lastSolvedQuestionKey = null;
 let isSolvingActive = false;
+let isPendingNextNavigation = false;
+
+function clearPendingAgentTimer() {
+  if (agentLoopTimeout) {
+    clearTimeout(agentLoopTimeout);
+    agentLoopTimeout = null;
+  }
+  isPendingNextNavigation = false;
+}
+
+function getCurrentQuestionIdentity(doc) {
+  const d = doc || getQuizDocument() || document;
+  const qnoEl = d.querySelector('.que .info .qno') || d.querySelector('.qno');
+  const qtextEl = d.querySelector('.qtext');
+  const qNum = qnoEl ? qnoEl.textContent.trim() : "1";
+  const qText = qtextEl ? qtextEl.textContent.trim() : "";
+  return {
+    qNum,
+    qText,
+    questionKey: `${qNum}::${qText.slice(0, 80)}`
+  };
+}
 
 // ---- TOAST UI (MINIMALIST) ----
 function showToast(title, message, type = 'info') {
@@ -245,7 +267,7 @@ function handleProactiveCaptchaCheck() {
       const state = res.agentState || {};
       if (state.status === 'running') {
         isAgentRunning = false;
-        if (agentLoopTimeout) clearTimeout(agentLoopTimeout);
+        clearPendingAgentTimer();
         
         chrome.storage.local.set({
           agentState: {
@@ -272,6 +294,22 @@ function onDomReady(fn) {
   }
 }
 
+function isQuizSummaryPage(doc) {
+  const d = doc || document;
+  const href = String((d.defaultView?.location?.href) || window.location.href || '').toLowerCase();
+  if (href.includes('mod/quiz/summary.php') || href.includes('mod/quiz/review.php')) {
+    return true;
+  }
+  const btns = d.querySelectorAll('button, input[type="submit"]');
+  for (const btn of btns) {
+    const label = String(btn.value || btn.textContent || '').toLowerCase().trim();
+    if (/(submit all and finish|kumpulkan semua dan selesai|kirim semua dan selesai|finish review)/i.test(label)) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Menjalankan pemeriksaan saat DOM selesai dimuat
 onDomReady(() => {
   if (isManagedByTopFrame()) return;
@@ -279,15 +317,55 @@ onDomReady(() => {
 
   chrome.storage.local.get(['agentState'], (res) => {
     const state = res.agentState || {};
-    
+
     if (state.status === 'running') {
       const doc = getQuizDocument();
       if (doc && doc.querySelector('.formulation')) {
+        const currentUrl = window.location.href;
+        const { questionKey } = getCurrentQuestionIdentity(doc);
+
+        if (state.pendingAutoNext && state.lastAutoNavUrl === currentUrl && state.lastAutoNavKey === questionKey) {
+          const sameCount = Number(state.samePageNavCount || 0) + 1;
+          if (sameCount >= 2) {
+            isAgentRunning = false;
+            clearPendingAgentTimer();
+            chrome.storage.local.set({
+              agentState: { status: 'idle', message: 'Berhenti: halaman tidak berpindah' }
+            });
+            showToast("", "Halaman berulang · Stop", "warning");
+            logAgentActivity("⚠️ Auto Mode dihentikan karena halaman tetap sama setelah navigasi Next (Anti-Loop Guard).");
+            return;
+          }
+          chrome.storage.local.set({
+            agentState: {
+              ...state,
+              pendingAutoNext: false,
+              samePageNavCount: sameCount
+            }
+          });
+        } else if (state.pendingAutoNext || state.samePageNavCount) {
+          chrome.storage.local.set({
+            agentState: {
+              status: 'running',
+              lastAutoNavUrl: null,
+              lastAutoNavKey: null,
+              pendingAutoNext: false,
+              samePageNavCount: 0
+            }
+          });
+        }
+
         logAgentActivity("🔄 Melanjutkan pengerjaan kuis di halaman baru...");
         isAgentRunning = true;
         startAgentLoop();
+      } else if (isQuizSummaryPage(document)) {
+        isAgentRunning = false;
+        clearPendingAgentTimer();
+        chrome.storage.local.set({ agentState: { status: 'completed' } });
+        showToast("", "Kuis selesai", "success");
+        logAgentActivity("🏁 Halaman ringkasan/pengumpulan kuis terdeteksi. Auto Mode berhenti aman sebelum submit final.");
       }
-    } 
+    }
     else if (state.status === 'paused-by-captcha') {
       const doc = getQuizDocument();
       if (doc && doc.querySelector('.formulation')) {
@@ -2825,25 +2903,194 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc) {
   return { success: false, mode: 'Failed' };
 }
 
+// ---- QUIZ NAVIGATION HELPERS (ANTI-LOOP & SUBMIT GUARD) ----
+const EXCLUDED_NAV_SELECTOR = [
+  '.qtext',
+  '.answer',
+  '.qn_buttons',
+  '[id^="quiznavbutton"]',
+  '.othernav',
+  '#mod_quiz_navblock',
+  '.block_quiz_navigation',
+  'header',
+  'footer',
+  'nav',
+  'aside',
+  '.breadcrumb',
+  '.activity-navigation',
+  '#next-activity-link',
+  '#prev-activity-link',
+  '.course-content'
+].join(', ');
+
+function getNavControlLabel(el) {
+  if (!el) return '';
+  return String(el.value || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isVisibleEnabledControl(el, doc) {
+  if (!el) return false;
+  if (el.disabled || el.getAttribute('aria-disabled') === 'true') return false;
+  if (String(el.type || '').toLowerCase() === 'hidden') return false;
+  try {
+    const win = (doc && doc.defaultView) || el.ownerDocument?.defaultView || window;
+    const style = win.getComputedStyle(el);
+    if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+      return false;
+    }
+  } catch (_) {}
+  return true;
+}
+
+function getCurrentPageNumberFromDoc(doc) {
+  try {
+    const href = String((doc && doc.defaultView && doc.defaultView.location && doc.defaultView.location.href) || window.location.href || '');
+    const m = href.match(/[?&]page=(\d+)/i);
+    return m ? parseInt(m[1], 10) : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
+function isExcludedQuizNavElement(el, doc) {
+  if (!el) return true;
+  if (el.closest && el.closest(EXCLUDED_NAV_SELECTOR)) {
+    return true;
+  }
+  const tag = String(el.tagName || '').toUpperCase();
+  if (tag === 'A') {
+    const href = String(el.getAttribute('href') || '').trim();
+    if (!href || href === '#' || /^javascript:/i.test(href)) return true;
+    if (/\/course\/view\.php|summary\.php|attempt\.php\?.*finish|mod\/[^/]+\/view\.php/i.test(href)) {
+      return true;
+    }
+    const pageMatch = href.match(/[?&]page=(\d+)/i);
+    if (pageMatch) {
+      const targetPage = parseInt(pageMatch[1], 10);
+      const currentPage = getCurrentPageNumberFromDoc(doc);
+      if (!Number.isNaN(targetPage) && targetPage <= currentPage) {
+        return true; // Hindari lompat mundur atau loop di halaman sekarang
+      }
+    }
+  }
+  return false;
+}
+
+function classifyNavButtonRole(el) {
+  if (!el) return 'other';
+  const label = getNavControlLabel(el).toLowerCase();
+  const id = String(el.id || '').toLowerCase();
+  const name = String(el.getAttribute('name') || '').toLowerCase();
+
+  // 1. Tombol Previous / Sebelumnya harus selalu diabaikan
+  if (
+    name === 'previous' ||
+    name === 'prev' ||
+    id.includes('prev-nav') ||
+    id.includes('prev') ||
+    /(previous|sebelumnya|kembali|prev page)/i.test(label)
+  ) {
+    return 'previous';
+  }
+
+  // 2. Cek Finish / Submit / Selesai LEBIH DULU (Moodle tetap mempertahankan name="next" & id="mod_quiz-next-nav" pada tombol "Finish attempt ...")
+  if (
+    /(finish attempt|submit all|selesaikan kuis|selesaikan upaya|akhiri percobaan|akhiri kuis|kumpulkan)/i.test(label) ||
+    /\b(submit|selesai|kirim)\b/i.test(label)
+  ) {
+    return 'finish_submit';
+  }
+
+  // 3. Tombol Next Page / Halaman Selanjutnya yang valid
+  if (
+    /^(next(\s*page)?|halaman\s*(selanjutnya|berikutnya)|selanjutnya|berikutnya|soal\s*berikutnya|lanjut(\s*soal)?)$/i.test(label) ||
+    /\b(next page|halaman selanjutnya|halaman berikutnya)\b/i.test(label)
+  ) {
+    return 'next';
+  }
+
+  // 4. Fallback atribut standar tombol Next form Moodle apabila label kustom tetap bukan finish/previous
+  if (name === 'next' || id === 'mod_quiz-next-nav' || el.classList?.contains('mod_quiz-next-nav')) {
+    return 'next';
+  }
+
+  return 'other';
+}
+
+function findQuizNavigationTarget(doc) {
+  const d = doc || getQuizDocument() || document;
+
+  // Prioritas 1: Kontrol submit resmi di dalam form #responseform / .submitbtns Moodle
+  const formSelectors = [
+    'form#responseform .submitbtns input[type="submit"], form#responseform .submitbtns button',
+    'form[action*="processattempt"] .submitbtns input[type="submit"], form[action*="processattempt"] .submitbtns button',
+    '.submitbtns #mod_quiz-next-nav, .submitbtns [name="next"], form#responseform [name="next"]',
+    '#mod_quiz-next-nav, .mod_quiz-next-nav'
+  ].join(', ');
+
+  const seen = new Set();
+  const formControls = Array.from(d.querySelectorAll(formSelectors));
+  for (const el of formControls) {
+    if (seen.has(el)) continue;
+    seen.add(el);
+    if (!isVisibleEnabledControl(el, d) || isExcludedQuizNavElement(el, d)) continue;
+    const role = classifyNavButtonRole(el);
+    if (role === 'previous') continue;
+    if (role === 'finish_submit') {
+      return { action: 'stop_finish', element: el, label: getNavControlLabel(el) };
+    }
+    if (role === 'next') {
+      return { action: 'click_next', element: el, label: getNavControlLabel(el) };
+    }
+  }
+
+  // Prioritas 2: Fallback aman untuk LMS non-Moodle standar (tanpa memindai tautan <a> biasa atau a[href*="page="])
+  let firstNext = null;
+  let firstFinish = null;
+  const fallbackControls = d.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, [role="button"]');
+  for (const el of fallbackControls) {
+    if (seen.has(el)) continue;
+    seen.add(el);
+    if (!isVisibleEnabledControl(el, d) || isExcludedQuizNavElement(el, d)) continue;
+    const role = classifyNavButtonRole(el);
+    if (role === 'next' && !firstNext) {
+      firstNext = el;
+      break;
+    }
+    if (role === 'finish_submit' && !firstFinish) {
+      firstFinish = el;
+    }
+  }
+
+  if (firstNext) {
+    return { action: 'click_next', element: firstNext, label: getNavControlLabel(firstNext) };
+  }
+  if (firstFinish) {
+    return { action: 'stop_finish', element: firstFinish, label: getNavControlLabel(firstFinish) };
+  }
+  return { action: 'none', element: null, label: '' };
+}
+
 // ---- NAVIGATION BUTTON CLICK SNIFFER ----
 function attachNextButtonSniffer(doc) {
   try {
     const d = doc || getQuizDocument() || document;
-    const buttons = d.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, a');
-    for (let btn of buttons) {
-      const text = (btn.textContent || btn.value || "").toLowerCase().trim();
-      if (text.includes('sebelumnya') || text.includes('previous')) continue;
-      if (text.includes('next') || text.includes('selanjutnya') || text.includes('halaman berikutnya')) {
-        if (!btn.__hasAutoSolveListener) {
-          btn.__hasAutoSolveListener = true;
-          btn.addEventListener('click', () => {
-            if (isAgentRunning) {
-              logAgentActivity("🖱️ Tombol navigasi diklik manual. Memantau pemuatan soal berikutnya...");
-              setTimeout(checkAndAutoSolveNewQuestion, 600);
-              setTimeout(checkAndAutoSolveNewQuestion, 1200);
-            }
-          });
-        }
+    const buttons = d.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, [role="button"]');
+    for (const btn of buttons) {
+      if (isExcludedQuizNavElement(btn, d)) continue;
+      if (classifyNavButtonRole(btn) !== 'next') continue;
+      if (!btn.__hasAutoSolveListener) {
+        btn.__hasAutoSolveListener = true;
+        btn.addEventListener('click', () => {
+          if (isAgentRunning) {
+            clearPendingAgentTimer();
+            logAgentActivity("🖱️ Tombol navigasi Next diklik. Memantau pemuatan soal berikutnya...");
+            setTimeout(checkAndAutoSolveNewQuestion, 600);
+            setTimeout(checkAndAutoSolveNewQuestion, 1200);
+          }
+        });
       }
     }
   } catch (e) {}
@@ -2881,11 +3128,7 @@ async function startAgentLoop() {
     }
 
     // 2. Dapatkan nomor soal aktif dan teks soal untuk identifikasi unik
-    const qnoEl = doc.querySelector('.que .info .qno') || doc.querySelector('.qno');
-    const qNum = qnoEl ? qnoEl.textContent.trim() : "1";
-    const qtextEl = doc.querySelector('.qtext');
-    const qText = qtextEl ? qtextEl.textContent.trim() : "";
-    const questionKey = `${qNum}::${qText.slice(0, 80)}`;
+    const { qNum, questionKey } = getCurrentQuestionIdentity(doc);
 
     lastSolvedQuestionKey = questionKey;
     lastObservedQNum = qNum;
@@ -2893,7 +3136,7 @@ async function startAgentLoop() {
     showToast("", `Soal #${qNum}...`, 'info');
 
     // 3. Jalankan alur pengerjaan soal
-    const solveResult = await solveQuestionFlow(qNum, doc);
+    await solveQuestionFlow(qNum, doc);
 
     // Pasang sniffer ke tombol navigasi jika user klik manual nanti
     attachNextButtonSniffer(doc);
@@ -2902,7 +3145,7 @@ async function startAgentLoop() {
     if (!isAgentRunning) return; // Jika disetop manual saat pengerjaan
 
     // 5. Cek Mode Navigasi (Semi-Auto vs Full-Auto)
-    const navStorage = await new Promise(r => chrome.storage.local.get(['navigationMode'], r));
+    const navStorage = await new Promise(r => chrome.storage.local.get(['navigationMode', 'baselineDelay', 'agentState'], r));
     const isSemiAuto = (navStorage.navigationMode !== 'full_auto'); // Default: semi_auto
 
     if (isSemiAuto) {
@@ -2911,61 +3154,74 @@ async function startAgentLoop() {
       return;
     }
 
-    // 6. Jika Full-Auto: Cari tombol Next page & Navigasi otomatis
-    const nextBtn = doc.querySelector('input[type="submit"][value*="Next"], input[type="button"][value*="Next"], a.btn[title*="Next"], button[id*="next"], .btn[value*="Next"], a[href*="page="]');
-    let moodleNextBtn = null;
-    const buttons = doc.querySelectorAll('button, input[type="submit"], input[type="button"], a.btn, a');
-    for (let btn of buttons) {
-      const text = (btn.textContent || btn.value || "").toLowerCase().trim();
-      if (text.includes('sebelumnya') || text.includes('previous')) continue;
-      if (text.includes('next page') || text.includes('selanjutnya') || text.includes('halaman berikutnya') || text.includes('next')) {
-        moodleNextBtn = btn;
-        break;
-      }
-    }
+    // 6. Jika Full-Auto: Klasifikasikan tombol Next vs Finish/Submit dengan aman
+    const navTarget = findQuizNavigationTarget(doc);
 
-    const targetNextBtn = nextBtn || moodleNextBtn;
-
-    // Cek tombol Finish Attempt
-    let isFinishPage = false;
-    for (let btn of buttons) {
-      const text = (btn.textContent || btn.value || "").toLowerCase().trim();
-      if (text.includes('finish attempt') || text.includes('selesaikan kuis') || text.includes('selesai kuis')) {
-        isFinishPage = true;
-        break;
-      }
-    }
-
-    if (isFinishPage && !targetNextBtn) {
-      logAgentActivity("🏁 Halaman terakhir terdeteksi (Finish Attempt). Agen berhenti demi keselamatan Anda (Auto-Submit Guard).");
-      showToast("", "Kuis selesai", "success");
+    if (navTarget.action === 'stop_finish') {
+      logAgentActivity(`🏁 Tombol berubah menjadi "${navTarget.label || 'Finish attempt / Submit'}" (Submit/Selesai). Auto Mode berhenti agar Anda bisa meninjau & mengirim kuis.`);
+      showToast("", "Siap Submit · Selesai", "success");
       isAgentRunning = false;
+      clearPendingAgentTimer();
       chrome.storage.local.set({ agentState: { status: 'completed' } });
       return;
     }
 
-    if (targetNextBtn) {
-      const storage = await new Promise(r => chrome.storage.local.get(['baselineDelay'], r));
-      const baselineDelay = storage.baselineDelay !== undefined ? Number(storage.baselineDelay) : 3;
-      
+    if (navTarget.action === 'click_next' && navTarget.element) {
+      const targetNextBtn = navTarget.element;
+      const baselineDelay = navStorage.baselineDelay !== undefined ? Number(navStorage.baselineDelay) : 3;
+
       const randomExtra = Math.floor(Math.random() * 3000) + 1000;
       const finalDelay = (baselineDelay * 1000) + randomExtra;
-      
-      logAgentActivity(`⏳ Menunggu ${(finalDelay / 1000).toFixed(1)} detik (Jeda acak) sebelum menekan tombol halaman berikutnya...`);
-      
+
+      logAgentActivity(`⏳ Menunggu ${(finalDelay / 1000).toFixed(1)} detik sebelum menekan tombol "${navTarget.label || 'Next page'}"...`);
+
+      clearPendingAgentTimer();
+      isPendingNextNavigation = true;
+      const priorSameCount = Number(navStorage.agentState?.samePageNavCount || 0);
+      const navPageUrl = window.location.href;
+
       agentLoopTimeout = setTimeout(async () => {
-        if (!isAgentRunning) return;
-        
-        logAgentActivity(`➡ Menavigasi ke halaman kuis berikutnya...`);
+        agentLoopTimeout = null;
+        if (!isAgentRunning) {
+          isPendingNextNavigation = false;
+          return;
+        }
+
+        // Catat checkpoint sebelum submit/navigasi agar reload halaman yang identik beruntun bisa dideteksi
+        try {
+          await new Promise(resolve => {
+            chrome.storage.local.set({
+              agentState: {
+                status: 'running',
+                pendingAutoNext: true,
+                lastAutoNavUrl: navPageUrl,
+                lastAutoNavKey: questionKey,
+                samePageNavCount: priorSameCount
+              }
+            }, resolve);
+          });
+        } catch (_) {}
+
+        logAgentActivity(`➡ Menekan tombol "${navTarget.label || 'Next page'}" ke halaman kuis berikutnya...`);
         await smoothScrollTo(targetNextBtn);
-        
+        if (!isAgentRunning) {
+          isPendingNextNavigation = false;
+          return;
+        }
+
         targetNextBtn.click();
+
+        // Fail-safe lepas lock bila SPA gagal berpindah tanpa reload penuh
+        setTimeout(() => {
+          isPendingNextNavigation = false;
+        }, 4000);
       }, finalDelay);
     } else {
-      logAgentActivity("🏁 Tombol navigasi berikutnya tidak ditemukan. Agen berhenti pengerjaan.");
+      logAgentActivity("🏁 Tombol Next halaman berikutnya tidak ditemukan. Agen berhenti pengerjaan.");
       showToast("", "Selesai", "success");
       isAgentRunning = false;
-      chrome.storage.local.set({ agentState: { status: 'idle' } });
+      clearPendingAgentTimer();
+      chrome.storage.local.set({ agentState: { status: 'completed' } });
     }
   } finally {
     isSolvingActive = false;
@@ -2986,17 +3242,17 @@ function checkAndAutoSolveNewQuestion() {
   const formulation = doc.querySelector('.formulation');
   if (!formulation) return;
 
-  const qnoEl = doc.querySelector('.que .info .qno') || doc.querySelector('.qno');
   const qtextEl = doc.querySelector('.qtext');
   if (!qtextEl) return;
 
-  const qNum = qnoEl ? qnoEl.textContent.trim() : "1";
-  const qText = qtextEl.textContent.trim();
-  const currentKey = `${qNum}::${qText.slice(0, 80)}`;
+  const { qNum, questionKey: currentKey } = getCurrentQuestionIdentity(doc);
 
   if (currentKey !== lastSolvedQuestionKey) {
+    isPendingNextNavigation = false;
     logAgentActivity(`🔄 Terdeteksi soal baru (#${qNum}). Menjawab otomatis...`);
     startAgentLoop();
+  } else if (isPendingNextNavigation) {
+    return;
   }
 }
 
@@ -3030,16 +3286,25 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (!isAgentRunning) {
       isAgentRunning = true;
       lastSolvedQuestionKey = null; // Reset agar langsung mengeksekusi soal yang sedang aktif
-      chrome.storage.local.set({ agentState: { status: 'running' } });
+      clearPendingAgentTimer();
+      chrome.storage.local.set({
+        agentState: {
+          status: 'running',
+          pendingAutoNext: false,
+          lastAutoNavUrl: null,
+          lastAutoNavKey: null,
+          samePageNavCount: 0
+        }
+      });
       logAgentActivity("🚀 AI Agent Auto-Solver dinyalakan oleh pengguna.");
       startAgentLoop();
     }
     sendResponse({ success: true, status: "running" });
-  } 
+  }
   else if (request.action === 'stopAgent') {
     isAgentRunning = false;
     lastSolvedQuestionKey = null;
-    if (agentLoopTimeout) clearTimeout(agentLoopTimeout);
+    clearPendingAgentTimer();
     if (isManagedByTopFrame()) return false;
     chrome.storage.local.set({ agentState: { status: 'idle' } });
     logAgentActivity("🛑 AI Agent Auto-Solver dimatikan oleh pengguna.");
@@ -3063,16 +3328,17 @@ chrome.storage.onChanged.addListener((changes, area) => {
       if (!isAgentRunning) {
         isAgentRunning = true;
         lastSolvedQuestionKey = null;
+        clearPendingAgentTimer();
         const doc = getQuizDocument();
         if (doc && doc.querySelector('.formulation')) {
           logAgentActivity("🚀 AI Agent Auto-Solver aktif di frame kuis.");
           startAgentLoop();
         }
       }
-    } else if (newState.status === 'idle') {
+    } else if (newState.status === 'idle' || newState.status === 'completed') {
       isAgentRunning = false;
       lastSolvedQuestionKey = null;
-      if (agentLoopTimeout) clearTimeout(agentLoopTimeout);
+      clearPendingAgentTimer();
     }
   }
 });
