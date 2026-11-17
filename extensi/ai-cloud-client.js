@@ -89,9 +89,15 @@
   }
 
   // Lookup gambar (multipart). `modelId` opsional sebagai form field.
-  async function searchAnswerImage(apiKey, { imageBlob, filename, modelId }, fetchImpl) {
+  async function searchAnswerImage(apiKey, { imageBlob, filename, modelId, imageProcessingMode = 'ocr_first', questionText = '', options = [], questionType = 'choice', isMultiChoice = false, expectedCount = 0 }, fetchImpl) {
     const fd = new FormData();
     fd.append('image', imageBlob, filename || 'question.png');
+    fd.append('imageProcessingMode', imageProcessingMode);
+    fd.append('questionText', questionText);
+    fd.append('options', JSON.stringify(options));
+    fd.append('questionType', questionType);
+    fd.append('isMultiChoice', String(Boolean(isMultiChoice)));
+    fd.append('expectedCount', String(expectedCount || 0));
     if (modelId) fd.append('modelId', modelId);
     return request('/api/v1/agent/search-answer-image', {
       method: 'POST', apiKey, fetchImpl, formData: fd

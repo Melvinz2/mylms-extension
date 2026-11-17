@@ -91,3 +91,23 @@ Mylms Extension/
 3. Klik tombol **🚀 Start**.
 4. Agen otomatis memecahkan soal, memilih jawaban yang tepat, dan menavigasi ke halaman berikutnya.
 5. Untuk menghentikan agen sewaktu-waktu, klik tombol **🛑 Stop**.
+
+
+## Mode soal bergambar — v1.4
+
+Di **Pengaturan → OCR Gambar**, pilih cara memproses gambar untuk **Direct AI**
+atau **Kamus Mini Cloud**, lalu simpan pengaturan:
+
+- **Cepat — Langsung ke AI Vision** (default): screenshot soal beserta teks, opsi,
+  jenis essay/isian, dan konteks checkbox dikirim langsung ke model Vision.
+  Jalur Cloud melewati OCR dan pencarian database. Pilih model Cloud yang mendukung gambar.
+- **OCR dahulu**: mempertahankan alur ekstraksi PaddleOCR sebelum pencarian/jawaban AI.
+
+Cloud tidak mencoba OCR atau model lain secara otomatis jika Mode Cepat gagal.
+Log menunjukkan mode aktual dan waktu server (OCR, database, AI, total), sedangkan
+waktu total pengerjaan ekstensi juga mencakup persiapan screenshot serta pengisian.
+Model/provider tetap menentukan lama respons; Mode Cepat hanya menghapus tahap OCR.
+
+Unduh ZIP rilis, ekstrak, lalu muat folder berisi `manifest.json` di Chrome.
+Untuk pemasangan unpacked yang sudah ada, perbarui isinya, klik **Reload** pada
+`chrome://extensions`, dan refresh halaman kuis. Gunakan arsip lokal untuk pengujian.

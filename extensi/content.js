@@ -118,11 +118,34 @@ const isExamSite = () => {
   );
 };
 
+// Agent state belongs to one tab. Unscoped legacy states never start automation.
+let agentTabId = null;
+const agentTabReady = new Promise(resolve => {
+  chrome.runtime.sendMessage({ action: 'getTabIdentity' }, response => {
+    if (!chrome.runtime.lastError && Number.isInteger(response?.tabId)) agentTabId = response.tabId;
+    resolve(agentTabId);
+  });
+});
+function ownsAgentState(state) {
+  return Number.isInteger(agentTabId) && state?.tabId === agentTabId;
+}
+function getAgentState(callback) {
+  chrome.storage.local.get(['agentState'], res => callback({
+    agentState: ownsAgentState(res.agentState) ? res.agentState : {}
+  }));
+}
+function setAgentState(patch, callback) {
+  if (!Number.isInteger(agentTabId)) return;
+  chrome.storage.local.set({ ...patch, agentState: { ...patch.agentState, tabId: agentTabId } }, callback);
+}
+let agentGeneration = 0;
+
 // ---- GLOBAL AGENT STATE ----
 let isAgentRunning = false;
 let agentLoopTimeout = null;
 let lastObservedQNum = null;
 let lastSolvedQuestionKey = null;
+let solvedQuestionKeys = new Set();
 let isSolvingActive = false;
 let isPendingNextNavigation = false;
 
@@ -134,17 +157,81 @@ function clearPendingAgentTimer() {
   isPendingNextNavigation = false;
 }
 
-function getCurrentQuestionIdentity(doc) {
-  const d = doc || getQuizDocument() || document;
-  const qnoEl = d.querySelector('.que .info .qno') || d.querySelector('.qno');
-  const qtextEl = d.querySelector('.qtext');
+function resetSolvedQuestionTracking() {
+  agentGeneration++;
+  lastSolvedQuestionKey = null;
+  solvedQuestionKeys.clear();
+}
+
+function resolveQuizDocAndScope(scopeOrDoc) {
+  if (!scopeOrDoc) {
+    const doc = getQuizDocument() || document;
+    return { doc, scope: doc };
+  }
+  if (scopeOrDoc.nodeType === 9) {
+    return { doc: scopeOrDoc, scope: scopeOrDoc };
+  }
+  const doc = scopeOrDoc.ownerDocument || getQuizDocument() || document;
+  return { doc, scope: scopeOrDoc };
+}
+
+function getQuestionIdentityFromElement(scopeEl) {
+  const scope = scopeEl || getQuizDocument() || document;
+  const qnoEl = scope.querySelector('.info .qno') || scope.querySelector('.qno');
+  const qtextEl = scope.querySelector('.qtext');
   const qNum = qnoEl ? qnoEl.textContent.trim() : "1";
   const qText = qtextEl ? qtextEl.textContent.trim() : "";
+  const idPrefix = (scope.nodeType === 1 && scope.id) ? `${scope.id}::` : '';
   return {
     qNum,
     qText,
-    questionKey: `${qNum}::${qText.slice(0, 80)}`
+    questionKey: `${idPrefix}${qNum}::${qText.slice(0, 80)}`
   };
+}
+
+function isAnswerableQuestionElement(queEl) {
+  if (!queEl || queEl.nodeType !== 1) return false;
+  if (!queEl.querySelector('.formulation')) return false;
+  if (queEl.classList.contains('description') || queEl.classList.contains('informationitem')) {
+    return false;
+  }
+  return Boolean(
+    queEl.querySelector([
+      '.answer input[type="radio"]:not([value="-1"]):not(:disabled)',
+      '.answer input[type="checkbox"]:not(:disabled)',
+      '.answer input[type="text"]:not(:disabled)',
+      '.answer input[type="number"]:not(:disabled)',
+      '.qtext input[type="text"]:not(:disabled)',
+      '.qtext input[type="number"]:not(:disabled)',
+      '.answer textarea',
+      '.answer [contenteditable="true"]',
+      '.qtype_essay_response [contenteditable="true"]',
+      '.answer iframe'
+    ].join(', '))
+  );
+}
+
+function getPageQuestions(doc) {
+  const d = doc || getQuizDocument() || document;
+  if (!d) return [];
+  const ques = Array.from(d.querySelectorAll('.que')).filter(isAnswerableQuestionElement);
+  if (ques.length > 0) return ques;
+  return d.querySelector('.formulation') ? [d] : [];
+}
+
+function getCurrentQuestionIdentity(doc) {
+  const d = doc || getQuizDocument() || document;
+  const questions = getPageQuestions(d);
+  if (questions.length > 1) {
+    const first = getQuestionIdentityFromElement(questions[0]);
+    const last = getQuestionIdentityFromElement(questions[questions.length - 1]);
+    return {
+      qNum: `${first.qNum}-${last.qNum}`,
+      qText: first.qText,
+      questionKey: `multi(${questions.length})::${first.questionKey}::${last.questionKey}`
+    };
+  }
+  return getQuestionIdentityFromElement(questions[0] || d);
 }
 
 // ---- TOAST UI (MINIMALIST) ----
@@ -263,13 +350,14 @@ function checkForCaptcha() {
 // Handler Deteksi Captcha Secara Proaktif
 function handleProactiveCaptchaCheck() {
   if (checkForCaptcha()) {
-    chrome.storage.local.get(['agentState'], (res) => {
+    getAgentState( (res) => {
       const state = res.agentState || {};
       if (state.status === 'running') {
         isAgentRunning = false;
+        resetSolvedQuestionTracking();
         clearPendingAgentTimer();
         
-        chrome.storage.local.set({
+        setAgentState({
           agentState: {
             status: 'paused-by-captcha',
             lastUrl: window.location.href,
@@ -311,11 +399,12 @@ function isQuizSummaryPage(doc) {
 }
 
 // Menjalankan pemeriksaan saat DOM selesai dimuat
-onDomReady(() => {
+onDomReady(async () => {
+  await agentTabReady;
   if (isManagedByTopFrame()) return;
   handleProactiveCaptchaCheck();
 
-  chrome.storage.local.get(['agentState'], (res) => {
+  getAgentState( (res) => {
     const state = res.agentState || {};
 
     if (state.status === 'running') {
@@ -329,14 +418,14 @@ onDomReady(() => {
           if (sameCount >= 2) {
             isAgentRunning = false;
             clearPendingAgentTimer();
-            chrome.storage.local.set({
+            setAgentState({
               agentState: { status: 'idle', message: 'Berhenti: halaman tidak berpindah' }
             });
             showToast("", "Halaman berulang · Stop", "warning");
             logAgentActivity("⚠️ Auto Mode dihentikan karena halaman tetap sama setelah navigasi Next (Anti-Loop Guard).");
             return;
           }
-          chrome.storage.local.set({
+          setAgentState({
             agentState: {
               ...state,
               pendingAutoNext: false,
@@ -344,7 +433,7 @@ onDomReady(() => {
             }
           });
         } else if (state.pendingAutoNext || state.samePageNavCount) {
-          chrome.storage.local.set({
+          setAgentState({
             agentState: {
               status: 'running',
               lastAutoNavUrl: null,
@@ -361,7 +450,7 @@ onDomReady(() => {
       } else if (isQuizSummaryPage(document)) {
         isAgentRunning = false;
         clearPendingAgentTimer();
-        chrome.storage.local.set({ agentState: { status: 'completed' } });
+        setAgentState({ agentState: { status: 'completed' } });
         showToast("", "Kuis selesai", "success");
         logAgentActivity("🏁 Halaman ringkasan/pengumpulan kuis terdeteksi. Auto Mode berhenti aman sebelum submit final.");
       }
@@ -369,7 +458,7 @@ onDomReady(() => {
     else if (state.status === 'paused-by-captcha') {
       const doc = getQuizDocument();
       if (doc && doc.querySelector('.formulation')) {
-        chrome.storage.local.set({
+        setAgentState({
           agentState: { status: 'running' }
         }, () => {
           showToast("", "Lanjut kuis...", "success");
@@ -838,13 +927,114 @@ async function waitForElementImages(container, timeoutMs = 1200) {
   return inspectFormulationImages(container);
 }
 
-// ---- MOUSE & SCROLL SIMULATION ----
-function smoothScrollTo(element) {
+// ---- MOUSE & ULTRA-SMOOTH EASING SCROLL ENGINE ----
+let _activeScrollCancel = null;
+
+function easeInOutQuint(t) {
+  return t < 0.5
+    ? 16 * t * t * t * t * t
+    : 1 - Math.pow(-2 * t + 2, 5) / 2;
+}
+
+function getEffectiveScrollTarget(element, doc) {
+  const container = getScrollContainer(element, doc);
+  if (container) return { type: 'element', el: container, doc };
+  const targetDoc = doc || document;
+  const rootEl = targetDoc.scrollingElement || targetDoc.documentElement || targetDoc.body;
+  return { type: 'document', el: rootEl, doc: targetDoc };
+}
+
+function smoothScrollTo(element, options = {}) {
   return new Promise((resolve) => {
-    try {
-      element.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } catch (e) {}
-    setTimeout(resolve, 600); // Tunggu sampai animasi scroll selesai
+    if (!element) { resolve(); return; }
+    if (_activeScrollCancel) {
+      try { _activeScrollCancel(); } catch (_) {}
+      _activeScrollCancel = null;
+    }
+
+    const d = element.ownerDocument || getQuizDocument() || document;
+    const win = d.defaultView || window;
+    const target = getEffectiveScrollTarget(element, d);
+    const scroller = target.el;
+    if (!scroller) { resolve(); return; }
+
+    const rect = element.getBoundingClientRect();
+    const isDocScroller = (target.type === 'document');
+    const viewportH = isDocScroller ? (win.innerHeight || scroller.clientHeight || 800) : (scroller.clientHeight || win.innerHeight || 800);
+    const containerTop = isDocScroller ? 0 : scroller.getBoundingClientRect().top;
+    const currentScrollTop = isDocScroller ? (win.scrollY ?? scroller.scrollTop ?? 0) : scroller.scrollTop;
+    const maxScrollTop = Math.max(0, (scroller.scrollHeight || 0) - viewportH);
+
+    const topOffset = options.topOffset !== undefined ? options.topOffset : 84;
+    const block = options.block || 'smart';
+
+    let desiredRelativeTop;
+    if (block === 'center' || (block === 'smart' && rect.height <= viewportH * 0.48)) {
+      desiredRelativeTop = Math.max(topOffset, (viewportH - rect.height) / 2);
+    } else {
+      desiredRelativeTop = topOffset;
+    }
+
+    const elemOffsetFromContainerTop = rect.top - containerTop;
+    const rawTargetTop = currentScrollTop + elemOffsetFromContainerTop - desiredRelativeTop;
+    const targetTop = Math.max(0, Math.min(maxScrollTop, Math.round(rawTargetTop)));
+    const delta = targetTop - currentScrollTop;
+
+    // Jika elemen sudah berada nyaman di posisi pandang, lewati animasi agar tidak berkedut
+    if (Math.abs(delta) < 18) {
+      resolve();
+      return;
+    }
+
+    // Jika tab tidak aktif (rAF di-throttle Chrome), geser langsung agar tidak macet
+    if (d.hidden) {
+      if (isDocScroller) win.scrollTo(win.scrollX, targetTop);
+      else scroller.scrollTop = targetTop;
+      resolve();
+      return;
+    }
+
+    const maxDuration = options.maxDuration !== undefined ? options.maxDuration : 920;
+    const duration = Math.min(maxDuration, Math.max(440, Math.round(Math.abs(delta) * 0.62)));
+    const startTs = performance.now();
+    let rafId = null;
+    let settled = false;
+
+    const finish = (applyFinal = true) => {
+      if (settled) return;
+      settled = true;
+      if (rafId !== null) win.cancelAnimationFrame(rafId);
+      clearTimeout(safetyTimer);
+      if (applyFinal) {
+        if (isDocScroller) win.scrollTo(win.scrollX, targetTop);
+        else scroller.scrollTop = targetTop;
+      }
+      if (_activeScrollCancel === cancel) _activeScrollCancel = null;
+      resolve();
+    };
+
+    const cancel = () => finish(false);
+    _activeScrollCancel = cancel;
+
+    const step = (now) => {
+      if (settled) return;
+      const elapsed = now - startTs;
+      const progress = Math.min(1, elapsed / duration);
+      const eased = easeInOutQuint(progress);
+      const nextTop = currentScrollTop + delta * eased;
+
+      if (isDocScroller) win.scrollTo(win.scrollX, nextTop);
+      else scroller.scrollTop = nextTop;
+
+      if (progress < 1) {
+        rafId = win.requestAnimationFrame(step);
+      } else {
+        finish(true);
+      }
+    };
+
+    const safetyTimer = setTimeout(() => finish(true), duration + 140);
+    rafId = win.requestAnimationFrame(step);
   });
 }
 
@@ -1182,7 +1372,7 @@ function restoreHiddenOverlays(hiddenMap) {
   hiddenMap.clear();
 }
 
-async function captureFormulationElement(doc, diagOut = null) {
+async function captureFormulationElement(scopeOrDoc, diagOut = null) {
   const diag = diagOut || {};
   diag.frameRole = (window === window.top) ? 'TOP' : 'IFRAME';
   diag.pageUrl = window.location.href;
@@ -1190,8 +1380,22 @@ async function captureFormulationElement(doc, diagOut = null) {
   diag.slices = [];
   diag.overlaysHidden = [];
 
-  const d = doc || getQuizDocument() || document;
-  const element = d.querySelector('.formulation') || d.querySelector('.qtext') || d.querySelector('.que');
+  const { doc: d, scope } = resolveQuizDocAndScope(scopeOrDoc);
+  const qtextCandidate = scope.querySelector('.qtext');
+  const answerEl = scope.querySelector('.answer');
+  const answerHasContentImg = answerEl
+    ? Array.from(answerEl.querySelectorAll('img')).some(img => isContentImage(img))
+    : false;
+  const preferEssayQtext = detectQuizInputType(scope) === 'essay'
+    && qtextCandidate
+    && !answerHasContentImg
+    && qtextCandidate.getBoundingClientRect().height > 20;
+
+  const element = preferEssayQtext
+    ? qtextCandidate
+    : ((scope !== d && scope.classList?.contains('formulation'))
+      ? scope
+      : (scope.querySelector('.formulation') || qtextCandidate || (scope !== d ? scope : d.querySelector('.que'))));
   if (!element) {
     diag.failReason = "Elemen .formulation / .qtext / .que tidak ditemukan pada targetDoc";
     logDebugEvent('CAPTURE', 'ERROR', diag.failReason, diag);
@@ -1213,17 +1417,21 @@ async function captureFormulationElement(doc, diagOut = null) {
     await new Promise(r => (dWin.requestAnimationFrame || window.requestAnimationFrame)(r));
   };
 
+  let didStitchScroll = false;
   try {
     // Tunggu sejenak jika masih ada gambar soal/opsi yang belum selesai dimuat (misal dari Service Worker ReplayWeb)
     diag.imgStats = await waitForElementImages(element, 1200);
 
-    // 1. Pastikan area soal masuk ke jangkauan pandang awal
-    try {
-      element.scrollIntoView({ behavior: 'instant', block: 'start' });
-    } catch (e) {
-      try { element.scrollIntoView(true); } catch (err) {}
+    // 1. Hanya gulir jika area soal belum terlihat utuh di viewport (hindari snap mendadak setelah smoothScrollTo)
+    const preBounds = computeFrameViewportBounds(d);
+    const preVisRect = element.getBoundingClientRect();
+    const preAbsTop = preBounds.absTop + preVisRect.top;
+    const preAbsBottom = preBounds.absTop + preVisRect.bottom;
+    const isAlreadyFullyVisible = (preAbsTop >= preBounds.clipTop + 2 && preAbsBottom <= preBounds.clipBottom - 2);
+    if (!isAlreadyFullyVisible) {
+      await smoothScrollTo(element, { block: 'start', topOffset: 16, maxDuration: 420 });
+      await waitFrames(45);
     }
-    await waitFrames(80);
 
     const initialBounds = computeFrameViewportBounds(d);
     diag.sourceType = initialBounds.sourceType;
@@ -1264,15 +1472,19 @@ async function captureFormulationElement(doc, diagOut = null) {
     const maxSlices = 12;
 
     for (let sliceIdx = 0; sliceIdx < maxSlices && capturedElemY < elemCssH - 1; sliceIdx++) {
-      // 2. Gulirkan garis `capturedElemY` tepat ke bagian atas viewport frame (+ padding aman 3px)
+      // 2. Pada slice pertama, pertahankan posisi halus bila seluruh elemen muat di viewport;
+      //    hanya geser jika elemen terpotong viewport atau sedang menyambung slice berikutnya
       const boundsNow = computeFrameViewportBounds(d);
       const preRect = element.getBoundingClientRect();
       const targetLineScreenY = boundsNow.absTop + preRect.top + capturedElemY;
+      const elemBottomScreenY = boundsNow.absTop + preRect.bottom;
       const desiredScreenY = boundsNow.clipTop + ((boundsNow.clipBottom - boundsNow.clipTop > 20) ? 3 : 0);
-      const scrollDelta = targetLineScreenY - desiredScreenY;
+      const fitsInCurrentViewport = (sliceIdx === 0 && capturedElemY === 0 && targetLineScreenY >= boundsNow.clipTop + 2 && elemBottomScreenY <= boundsNow.clipBottom - 2);
+      const scrollDelta = fitsInCurrentViewport ? 0 : (targetLineScreenY - desiredScreenY);
 
       let scrolled = false;
       if (Math.abs(scrollDelta) > 1.5) {
+        didStitchScroll = true;
         if (scrollContainer) {
           const prev = scrollContainer.scrollTop;
           scrollContainer.scrollTop = prev + scrollDelta;
@@ -1424,12 +1636,14 @@ async function captureFormulationElement(doc, diagOut = null) {
   } finally {
     restoreHiddenOverlays(hiddenOverlays);
     try {
-      if (scrollContainer) {
-        scrollContainer.scrollTop = origInnerScrollTop;
-        scrollContainer.scrollLeft = origInnerScrollLeft;
-      }
-      if (d !== document && window.scrollY !== origTopScrollY) {
-        window.scrollTo(window.scrollX, origTopScrollY);
+      if (didStitchScroll) {
+        if (scrollContainer) {
+          scrollContainer.scrollTop = origInnerScrollTop;
+          scrollContainer.scrollLeft = origInnerScrollLeft;
+        }
+        if (d !== document && window.scrollY !== origTopScrollY) {
+          window.scrollTo(window.scrollX, origTopScrollY);
+        }
       }
     } catch (e) {}
   }
@@ -1438,17 +1652,17 @@ async function captureFormulationElement(doc, diagOut = null) {
 // ---- CLICK SIMULATOR (TAHAP 5: MULTI-TYPE MOODLE INPUTS - RADIO, CHECKBOX, TEXT) ----
 function clickInputOption(optionElement, preserveOthers = false) {
   const input = optionElement.querySelector('input[type="radio"], input[type="checkbox"]');
-  if (input) {
+  if (input && input.isConnected !== false && !input.disabled && !input.matches(':disabled')) {
     if (input.type === 'checkbox') {
       if (!input.checked) {
         input.click();
       }
     } else {
-      input.checked = true;
-      input.click();
+      if (!input.checked) input.click();
     }
     input.dispatchEvent(new Event('change', { bubbles: true }));
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    if (!input.checked || input.isConnected === false) return false;
     
     // Bersihkan outline dari opsi lain di pertanyaan yang sama jika ini adalah radio
     const parent = optionElement.closest('.answer') || optionElement.parentElement;
@@ -1542,7 +1756,7 @@ function dispatchCommitEvents(el) {
   el.dispatchEvent(new Event('blur', { bubbles: true }));
 }
 
-async function typeTextGradually(fullText, onStep) {
+async function typeTextGradually(fullText, onStep, shouldContinue = () => true) {
   const str = String(fullText || '');
   const len = str.length;
   if (len === 0) return;
@@ -1550,6 +1764,7 @@ async function typeTextGradually(fullText, onStep) {
   const chunkSize = len <= 28 ? 2 : Math.max(3, Math.ceil(len / 28));
   let pos = 0;
   while (pos < len) {
+    if (!shouldContinue()) return;
     const nextPos = Math.min(len, pos + chunkSize);
     const partial = str.slice(0, nextPos);
     const chunk = str.slice(pos, nextPos);
@@ -1564,7 +1779,8 @@ async function typeTextGradually(fullText, onStep) {
 /**
  * Type answer cleanly into Moodle Atto, TinyMCE iframe, generic contenteditable, textarea, or input.
  */
-async function fillTextInputOption(answerText, doc) {
+async function fillTextInputOption(answerText, doc, shouldContinue = () => true) {
+  if (!shouldContinue()) return { success: false };
   const cleanText = String(answerText || '').trim();
   if (!cleanText) return { success: false };
 
@@ -1586,7 +1802,8 @@ async function fillTextInputOption(answerText, doc) {
         setNativeControlValue(textarea, htmlPartial);
         textarea.dispatchEvent(new Event('input', { bubbles: true }));
       }
-    });
+    }, shouldContinue);
+    if (!shouldContinue()) return { success: false };
 
     const finalHtml = formatAnswerAsHtmlParagraphs(cleanText);
     visualRichEl.innerHTML = finalHtml;
@@ -1614,17 +1831,18 @@ async function fillTextInputOption(answerText, doc) {
   }
 
   const plainTarget = targets.textarea || targets.textInput;
-  if (plainTarget) {
+  if (plainTarget && !plainTarget.disabled && !plainTarget.readOnly && !plainTarget.matches(':disabled')) {
     try { plainTarget.focus(); } catch (_) {}
     await typeTextGradually(cleanText, (partial, chunk) => {
       setNativeControlValue(plainTarget, partial);
       dispatchTypingEvents(plainTarget, chunk);
-    });
+    }, shouldContinue);
+    if (!shouldContinue()) return { success: false };
     setNativeControlValue(plainTarget, cleanText);
     dispatchCommitEvents(plainTarget);
     styleSelectedTarget(plainTarget);
     return {
-      success: true,
+      success: String(plainTarget.value || '').trim() === cleanText && plainTarget.isConnected !== false,
       mode: plainTarget.tagName === 'TEXTAREA' ? 'textarea' : 'text_input',
       element: plainTarget
     };
@@ -1633,27 +1851,136 @@ async function fillTextInputOption(answerText, doc) {
   return { success: false };
 }
 
+function getOptionLetterForElement(el, idx) {
+  const numEl = el ? el.querySelector('.answernumber') : null;
+  if (numEl) {
+    const numText = numEl.textContent.trim().toUpperCase().replace(/[^A-E]/g, '');
+    if (['A', 'B', 'C', 'D', 'E'].includes(numText)) return numText;
+  }
+  return String.fromCharCode(65 + Math.min(idx, 25));
+}
+
+function extractChoiceLettersList(rawChoice) {
+  const s = String(rawChoice || '').trim().toUpperCase();
+  if (!s || ['BENAR', 'SALAH', 'TRUE', 'FALSE'].includes(s)) return [];
+  // Compact letter sequence like "ADE" or "AC"
+  if (/^[A-E]{2,5}$/.test(s)) {
+    return Array.from(new Set(s.split('')));
+  }
+  // Separated list like "A, D, E", "A, D, AND E", "A, D, DAN E", "A & D + E"
+  const normalized = s.replace(/\b(AND|DAN)\b/g, ',');
+  if (/^[A-E](?:[\s,&+/|;]+[A-E])+\.?$|^[A-E]$/.test(normalized)) {
+    const found = normalized.match(/[A-E]/g) || [];
+    return Array.from(new Set(found));
+  }
+  // Prefixed lines like "A. ... \n D. ..."
+  const lineLetters = Array.from(s.matchAll(/(?:^|[\n;|])\s*([A-E])[\.\)\s]/g)).map(m => m[1]);
+  return Array.from(new Set(lineLetters));
+}
+
+function extractExpectedMultiChoiceCount(questionText) {
+  const txt = String(questionText || '').toLowerCase();
+  if (!txt) return 0;
+
+  const numMatch =
+    txt.match(/(?:there\s+are|choose|select|pick|mark|pilih(?:lah)?|tentukan|ada)\s+(?:the\s+|tepat\s+)?([2-5])\b/) ||
+    txt.match(/\b([2-5])\s+(?:correct\s+answers?|answers?|options?|pilihan\s+(?:yang\s+)?benar|jawaban\s+(?:yang\s+)?benar|jawaban\s+tepat)/);
+  if (numMatch) return parseInt(numMatch[1], 10);
+
+  const wordMap = { two: 2, dua: 2, three: 3, tiga: 3, four: 4, empat: 4, five: 5, lima: 5 };
+  const wordMatch = txt.match(/(?:there\s+are|choose|select|pick|mark|pilih(?:lah)?|tentukan|ada)\s+(?:the\s+|tepat\s+)?(two|dua|three|tiga|four|empat|five|lima)\b/);
+  if (wordMatch && wordMap[wordMatch[1]]) return wordMap[wordMatch[1]];
+
+  return 0;
+}
+
+function clearCheckboxSelections(doc) {
+  const d = doc || getQuizDocument() || document;
+  const rows = d.querySelectorAll('.answer > div');
+  rows.forEach(row => {
+    const cb = row.querySelector('input[type="checkbox"]');
+    if (cb && cb.checked) {
+      cb.click();
+    }
+    row.removeAttribute('data-km-selected');
+    row.style.outline = 'none';
+    row.style.outlineOffset = '0';
+  });
+}
+
 function selectOptionsByLetters(choiceLetters, doc) {
   if (!choiceLetters) return { success: false, count: 0 };
   const letters = Array.isArray(choiceLetters)
-    ? choiceLetters.map(l => String(l).trim().toUpperCase())
-    : String(choiceLetters).toUpperCase().split(/[^A-E]/).filter(Boolean);
+    ? Array.from(new Set(choiceLetters.map(l => String(l).trim().toUpperCase()).filter(l => /^[A-E]$/.test(l))))
+    : extractChoiceLettersList(choiceLetters);
 
   if (letters.length === 0) return { success: false, count: 0 };
   const d = doc || getQuizDocument() || document;
   const optionElements = d.querySelectorAll('.answer > div');
   let selectedCount = 0;
-  for (let el of optionElements) {
-    const numEl = el.querySelector('.answernumber');
-    if (numEl) {
-      const numText = numEl.textContent.trim().toUpperCase().replace(/[^A-E]/g, '');
-      if (letters.includes(numText)) {
-        clickInputOption(el, true);
-        selectedCount++;
+  optionElements.forEach((el, idx) => {
+    const letter = getOptionLetterForElement(el, idx);
+    if (letters.includes(letter)) {
+      if (clickInputOption(el, true)) selectedCount++;
+    } else {
+      uncheckCheckboxRow(el);
+    }
+  });
+  return { success: selectedCount === letters.length, count: selectedCount };
+}
+
+// Cabut centang lama (mis. jawaban tersimpan sebelumnya) agar hasil akhir = persis himpunan jawaban AI
+function uncheckCheckboxRow(rowEl) {
+  const cb = rowEl && rowEl.querySelector('input[type="checkbox"]');
+  if (cb && cb.checked) {
+    cb.click();
+    cb.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  if (rowEl && rowEl.hasAttribute('data-km-selected')) {
+    rowEl.removeAttribute('data-km-selected');
+    rowEl.style.outline = 'none';
+    rowEl.style.outlineOffset = '0';
+  }
+}
+
+function selectMultipleOptionsByText(answerText, threshold = 0.70, doc) {
+  if (!answerText) return { success: false, count: 0 };
+  const d = doc || getQuizDocument() || document;
+  const optionElements = Array.from(d.querySelectorAll('.answer > div'));
+  if (optionElements.length === 0) return { success: false, count: 0 };
+
+  const segments = String(answerText)
+    .split(/\r?\n|\|\||\||;/)
+    .map(part => part.replace(/^\s*[A-E][\.\)\s]+/i, '').trim())
+    .filter(part => part.length >= 2);
+  if (segments.length === 0) return { success: false, count: 0 };
+
+  let count = 0;
+  const matchedSet = new Set();
+  for (const seg of segments) {
+    let bestEl = null;
+    let bestScore = -1;
+    for (const el of optionElements) {
+      const numEl = el.querySelector('.answernumber');
+      const textEl = el.querySelector('.flex-fill') || el.querySelector('label') || el;
+      const cleanText = textEl.textContent.replace(numEl ? numEl.textContent : '', '').trim();
+      const score = getStringSimilarity(cleanText, seg);
+      if (score > bestScore) {
+        bestScore = score;
+        bestEl = el;
+      }
+    }
+    if (bestEl && bestScore >= threshold && !matchedSet.has(bestEl)) {
+      if (clickInputOption(bestEl, true)) {
+        matchedSet.add(bestEl);
+        count++;
       }
     }
   }
-  return { success: selectedCount > 0, count: selectedCount };
+  if (count > 0) {
+    optionElements.forEach(el => { if (!matchedSet.has(el)) uncheckCheckboxRow(el); });
+  }
+  return { success: count > 0, count };
 }
 
 // ---- SELECT OPTION BY ANSWER FUZZY MATCH ----
@@ -1677,8 +2004,8 @@ function selectOptionByText(answerText, threshold = 0.70, doc) {
   });
 
   if (bestMatch && highestScore >= threshold) {
-    clickInputOption(bestMatch);
-    return { success: true, element: bestMatch, score: highestScore };
+    const success = clickInputOption(bestMatch);
+    return { success, element: bestMatch, score: highestScore };
   }
   
   return { success: false, score: highestScore };
@@ -1692,35 +2019,50 @@ function selectOptionByLetter(choiceLetter, doc) {
 
   const d = doc || getQuizDocument() || document;
   const optionElements = d.querySelectorAll('.answer > div');
-  for (let el of optionElements) {
-    const numEl = el.querySelector('.answernumber');
-    if (numEl) {
-      const numText = numEl.textContent.trim().toUpperCase().replace(/[^A-E]/g, '');
-      if (numText === targetLetter) {
-        clickInputOption(el);
-        return { success: true, element: el };
-      }
+  for (let idx = 0; idx < optionElements.length; idx++) {
+    const el = optionElements[idx];
+    const letter = getOptionLetterForElement(el, idx);
+    if (letter === targetLetter) {
+      return { success: clickInputOption(el), element: el };
     }
   }
   return { success: false };
 }
 
 // ---- UNIFIED QUIZ ANSWER APPLIER (TAHAP 5 + ESSAY / ATTO SUPPORT) ----
-async function applyAnswerToQuizDom({ choice, answer }, threshold = 0.60, doc) {
+async function applyAnswerToQuizDom({ choice, answer }, threshold = 0.60, doc, shouldContinue = () => isAgentRunning) {
+  if (!shouldContinue()) return { success: false, mode: 'Stopped' };
   const d = doc || getQuizDocument() || document;
   const inputType = detectQuizInputType(d);
 
   // Essay / Rich-text editor / Short-answer typed input takes direct typing path
   if (inputType === 'essay' || inputType === 'shortanswer') {
-    const typedMatch = await fillTextInputOption(answer || choice, d);
+    const typedMatch = await fillTextInputOption(answer || choice, d, shouldContinue);
     if (typedMatch.success) {
       return { success: true, mode: typedMatch.mode || 'text_input', element: typedMatch.element };
     }
     return { success: false };
   }
 
-  // 1. Opsi Multiple Response (Checkboxes A, C dll.)
-  if (choice && (choice.includes(',') || choice.length > 1) && !['BENAR', 'SALAH', 'TRUE', 'FALSE'].includes(choice.toUpperCase())) {
+  const hasCheckboxes = Boolean(d.querySelector('.answer input[type="checkbox"]'));
+
+  // 1. Opsi Multiple Response (Checkboxes A, D, E dll.)
+  if (hasCheckboxes) {
+    const multiFromChoice = extractChoiceLettersList(choice);
+    if (multiFromChoice.length > 0) {
+      const multiMatch = selectOptionsByLetters(multiFromChoice, d);
+      if (multiMatch.success) return { success: true, mode: 'multi_checkbox', count: multiMatch.count };
+    }
+    const multiFromAnswerLetters = extractChoiceLettersList(answer);
+    if (multiFromAnswerLetters.length > 0) {
+      const multiMatch = selectOptionsByLetters(multiFromAnswerLetters, d);
+      if (multiMatch.success) return { success: true, mode: 'multi_checkbox', count: multiMatch.count };
+    }
+    if (answer) {
+      const multiTextMatch = selectMultipleOptionsByText(answer, threshold, d);
+      if (multiTextMatch.success) return { success: true, mode: 'multi_checkbox_text', count: multiTextMatch.count };
+    }
+  } else if (choice && (choice.includes(',') || choice.length > 1) && !['BENAR', 'SALAH', 'TRUE', 'FALSE'].includes(choice.toUpperCase())) {
     const multiMatch = selectOptionsByLetters(choice, d);
     if (multiMatch.success) return { success: true, mode: 'multi_checkbox', count: multiMatch.count };
   }
@@ -1742,7 +2084,7 @@ async function applyAnswerToQuizDom({ choice, answer }, threshold = 0.60, doc) {
   }
 
   // 4. Fallback terakhir: ketik ke text input / textarea / editor jika tersedia
-  const textMatch = await fillTextInputOption(answer || choice, d);
+  const textMatch = await fillTextInputOption(answer || choice, d, shouldContinue);
   if (textMatch.success) return { success: true, mode: textMatch.mode || 'text_input', element: textMatch.element };
 
   return { success: false };
@@ -1861,20 +2203,21 @@ function parseAiResponse(rawText, expectedType = 'choice') {
     return { choice: '', answer: strippedPlain || clean, reasoning };
   }
 
-  // 5. Fallback Cerdas pilihan ganda: Cari kesimpulan huruf di bagian akhir teks
+  // 5. Fallback Cerdas pilihan ganda: Cari kesimpulan huruf tunggal/jamak di bagian akhir teks
   const conclusionRegexes = [
-    /(?:pilihan|opsi|jawaban)\s*(?:yang\s+sesuai|yang\s+benar|akhir)?\s*(?:adalah|=)?\s*[:\s]*\b([A-E])\b/gi,
-    /"choice"\s*:\s*"([A-E])"/gi,
-    /"pilihan"\s*:\s*"([A-E])"/gi,
-    /(?:jadi|maka|kesimpulan)\s*(?:jawaban)?\s*(?:yang\s+benar)?\s*(?:adalah|=)?\s*[:\s]*\b([A-E])\b/gi
+    /(?:pilihan|opsi|jawaban)\s*(?:yang\s+sesuai|yang\s+benar|akhir)?\s*(?:adalah|=)?\s*[:\s]*\b([A-E](?:\s*(?:,?\s*(?:dan|and|&)|,)\s*[A-E])*)\b/gi,
+    /"choice"\s*:\s*"([A-E](?:\s*,\s*[A-E])*)"/gi,
+    /"pilihan"\s*:\s*"([A-E](?:\s*,\s*[A-E])*)"/gi,
+    /(?:jadi|maka|kesimpulan)\s*(?:jawaban)?\s*(?:yang\s+benar)?\s*(?:adalah|=)?\s*[:\s]*\b([A-E](?:\s*(?:,?\s*(?:dan|and|&)|,)\s*[A-E])*)\b/gi
   ];
 
   for (let regex of conclusionRegexes) {
     const matches = Array.from(clean.matchAll(regex));
     if (matches && matches.length > 0) {
       const lastMatch = matches[matches.length - 1];
-      const foundLetter = lastMatch[1].toUpperCase();
-      return { choice: foundLetter, answer: clean, reasoning };
+      const extracted = extractChoiceLettersList(lastMatch[1]);
+      const foundChoice = extracted.length > 1 ? extracted.join(', ') : lastMatch[1].trim().toUpperCase();
+      return { choice: foundChoice, answer: clean, reasoning };
     }
   }
 
@@ -1896,18 +2239,51 @@ function parseAiResponse(rawText, expectedType = 'choice') {
 }
 
 // ---- BULLETPROOF FETCH HELPER (BYPASS MIXED CONTENT, CSP & CORS VIA BACKGROUND PROXY) ----
-function proxyFetchViaBackground(url, options = {}) {
-  return new Promise((resolve, reject) => {
-    if (!isExtensionValid()) {
-      reject(new Error("Koneksi ekstensi terputus (Extension context invalidated). Silakan refresh halaman web ini (F5 / Ctrl+R)."));
-      return;
+async function serializeFormDataForProxy(formData) {
+  const fields = {};
+  const files = [];
+  for (const [key, val] of formData.entries()) {
+    if (typeof Blob !== 'undefined' && val instanceof Blob) {
+      const base64 = await blobToBase64(val);
+      files.push({
+        field: key,
+        filename: val.name || 'upload.bin',
+        mimeType: val.type || 'application/octet-stream',
+        base64
+      });
+    } else {
+      fields[key] = String(val);
     }
+  }
+  return { fields, files };
+}
+
+async function proxyFetchViaBackground(url, options = {}) {
+  if (!isExtensionValid()) {
+    throw new Error("Koneksi ekstensi terputus (Extension context invalidated). Silakan refresh halaman web ini (F5 / Ctrl+R).");
+  }
+
+  let sendOptions = options ? { ...options } : {};
+  let multipart = null;
+  if (typeof FormData !== 'undefined' && sendOptions.body instanceof FormData) {
+    multipart = await serializeFormDataForProxy(sendOptions.body);
+    delete sendOptions.body;
+  }
+
+  const messagePayload = {
+    action: "proxyFetch",
+    url: url,
+    options: sendOptions
+  };
+  if (multipart) messagePayload.multipart = multipart;
+  if (sendOptions.responseType) {
+    messagePayload.responseType = sendOptions.responseType;
+    delete sendOptions.responseType;
+  }
+
+  return await new Promise((resolve, reject) => {
     try {
-      chrome.runtime.sendMessage({
-        action: "proxyFetch",
-        url: url,
-        options: options
-      }, (resp) => {
+      chrome.runtime.sendMessage(messagePayload, (resp) => {
         if (chrome.runtime.lastError) {
           const errMsg = chrome.runtime.lastError.message || "";
           if (errMsg.includes("context invalidated") || errMsg.includes("Could not establish connection")) {
@@ -1925,8 +2301,12 @@ function proxyFetchViaBackground(url, options = {}) {
           ok: resp.ok,
           status: resp.status,
           statusText: resp.statusText || "",
+          headers: { get: () => null },
           viaProxy: true,
           durationMs: resp.durationMs ?? null,
+          base64: resp.base64 || null,
+          mimeType: resp.mimeType || null,
+          dataUrl: resp.dataUrl || null,
           json: async () => {
             try {
               return JSON.parse(resp.data);
@@ -1948,6 +2328,12 @@ async function safeFetch(url, options = {}) {
   // browser akan langsung memblokir dengan 'Mixed Content' jika dipanggil via fetch() di tab.
   // Begitu pula IP lokal/LAN (misal http://192.168.x.x, http://localhost).
   // Maka LANGSUNG alihkan ke background proxy yang bebas dari batasan Mixed Content, CSP & CORS!
+  // Request ke Kamus Mini Cloud membawa header kustom (X-AI-Client-Version) yang memicu preflight CORS
+  // dan gagal dari origin halaman kuis -> langsung lewat background proxy tanpa mencoba fetch langsung.
+  if (typeof url === 'string' && typeof KAMUS_MINI_CLOUD_URL === 'string' && url.startsWith(KAMUS_MINI_CLOUD_URL)) {
+    return await proxyFetchViaBackground(url, options);
+  }
+
   const isHttpsPage = window.location.protocol === 'https:';
   const isInsecureUrl = typeof url === 'string' && url.startsWith('http://');
   const isLocalOrLan = typeof url === 'string' && (url.includes('192.168.') || url.includes('10.') || url.includes('172.') || url.includes('localhost') || url.includes('127.0.0.1'));
@@ -1960,7 +2346,7 @@ async function safeFetch(url, options = {}) {
     const res = await fetch(url, options);
     return res;
   } catch (err) {
-    logDebugEvent('NETWORK', 'WARN', `Direct fetch gagal (${err.message}), dialihkan via background proxy`, { url });
+    logDebugEvent('NETWORK', 'WARN', `Direct fetch gagal (${err.message}), dialihkan via background proxy: ${String(url).split('?')[0]}`, { url: String(url).split('?')[0] });
     return await proxyFetchViaBackground(url, options);
   }
 }
@@ -2082,7 +2468,14 @@ async function callConfiguredAiApi({ provider, apiKey, model, config, systemProm
   };
 }
 
-function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning = false, questionType = 'choice' }) {
+function formatMultiAnswerRule(expectedCount = 0) {
+  if (expectedCount >= 2) {
+    return `\nCATATAN PENTING: Soal ini bertipe CHECKBOX dengan TEPAT ${expectedCount} JAWABAN BENAR! Wajib cantumkan TEPAT ${expectedCount} huruf dipisah koma di field "choice" (misal: "C, D, E"), JANGAN hanya memilih 1 jawaban.`;
+  }
+  return '\nCATATAN PENTING: Soal ini bertipe CHECKBOX (multiple answers / all that apply). Wajib cantumkan SEMUA huruf jawaban benar dipisah koma di field "choice" (misal: "A, D, E"), JANGAN hanya memilih 1 jawaban.';
+}
+
+function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning = false, questionType = 'choice', isMultiChoice = false, expectedCount = 0 }) {
   const isTypedMode = (questionType === 'essay' || questionType === 'shortanswer');
   const letters = isTypedMode ? [] : (options || [])
     .map(opt => {
@@ -2091,8 +2484,13 @@ function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWa
     })
     .filter(Boolean);
   const letterHint = letters.length > 0
-    ? `\nPilihan radio aktif pada halaman (${letters.join(', ')}).`
+    ? `\nPilihan radio/checkbox aktif pada soal (${letters.join(', ')}).`
     : '';
+
+  const multiRule = (!isTypedMode && isMultiChoice) ? formatMultiAnswerRule(expectedCount) : '';
+  const choiceFormatDesc = isMultiChoice
+    ? (expectedCount >= 2 ? `TEPAT ${expectedCount} huruf pilihan dipisah koma (misal "C, D, E")` : 'semua huruf pilihan benar dipisah koma (misal "A, D, E")')
+    : 'huruf pilihan kapital (A/B/C/D/E)';
 
   const kindLabel = isTypedMode ? 'ujian isian / essay' : 'ujian pilihan ganda';
   const intro = hasDiagramImages
@@ -2110,10 +2508,10 @@ function buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWa
 4. Di akhir respons, WAJIB sertakan kesimpulan dalam format JSON persis:
 {"choice": "", "answer": "teks jawaban final yang siap diketik ke kotak jawaban"}`
     : `Instruksi Pengerjaan:
-1. Baca seluruh teks soal, rumus LaTeX ($...$),${hasDiagramImages && !groqNoVisionWarning ? ' gambar diagram terlampir,' : ''} serta pilihan A sampai E di atas dengan sangat teliti.
+1. Baca seluruh teks soal, rumus LaTeX ($...$),${hasDiagramImages && !groqNoVisionWarning ? ' gambar diagram terlampir,' : ''} serta pilihan di atas dengan sangat teliti.${multiRule}
 2. Lakukan perhitungan matematis / penalaran langkah demi langkah hingga tuntas (misal jika mencari tembereng lingkaran: hitung luas juring lalu kurangi luas segitiga, jangan berhenti di tengah).
 3. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON persis:
-{"choice": "huruf pilihan kapital (A/B/C/D/E)", "answer": "teks atau angka jawaban yang dipilih"}`;
+{"choice": "${choiceFormatDesc}", "answer": "teks atau angka jawaban yang dipilih"}`;
 
   return `${intro}${letterHint}
 
@@ -2124,29 +2522,37 @@ ${ocrMarkdown}
 ${instructions}`;
 }
 
-function buildDirectAiPrompts({ questionType = 'choice', mode = 'text', questionText = '', options = [], ocrMarkdown = '', hasDiagramImages = false, groqNoVisionWarning = false }) {
+function buildDirectAiPrompts({ questionType = 'choice', isMultiChoice = false, expectedCount = 0, mode = 'text', questionText = '', options = [], ocrMarkdown = '', hasDiagramImages = false, groqNoVisionWarning = false }) {
   const isTypedMode = (questionType === 'essay' || questionType === 'shortanswer');
+  const multiHint = (!isTypedMode && isMultiChoice) ? formatMultiAnswerRule(expectedCount) : '';
+  const choiceFormatDesc = isMultiChoice
+    ? (expectedCount >= 2 ? `TEPAT ${expectedCount} huruf pilihan dipisah koma (misal "C, D, E")` : 'semua huruf pilihan benar dipisah koma (misal "A, D, E")')
+    : 'huruf pilihan (A/B/C/D/E)';
+
   const systemPrompt = isTypedMode
     ? 'Kamu adalah asisten ahli akademik dan pemecah soal ujian isian/essay yang sangat teliti. Analisis soal dengan cermat, lalu akhiri dengan format JSON valid {"choice": "", "answer": "jawaban final siap diketik ke kotak jawaban"}.'
-    : 'Kamu adalah asisten ahli matematika dan pemecah ujian pilihan ganda yang sangat teliti. Analisis teks dan gambar secara cermat, hitung langkah demi langkah hingga tuntas, dan akhiri dengan format JSON {"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks jawaban"}.';
+    : `Kamu adalah asisten ahli matematika dan pemecah ujian pilihan ganda yang sangat teliti. Analisis teks dan gambar secara cermat, hitung langkah demi langkah hingga tuntas, dan akhiri dengan format JSON {"choice": "${choiceFormatDesc}", "answer": "teks jawaban"}.`;
 
   if (mode === 'ocr') {
     return {
       systemPrompt,
-      userPrompt: buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning, questionType })
+      userPrompt: buildOcrPrompt({ ocrMarkdown, options, hasDiagramImages, groqNoVisionWarning, questionType, isMultiChoice, expectedCount })
     };
   }
 
   if (mode === 'vision') {
+    const qTextContext = (questionText && String(questionText).trim())
+      ? `\nTeks Pertanyaan di Halaman:\n${String(questionText).replace(/\[Gambar Diagram\]/g, '').trim()}\n`
+      : '';
     if (isTypedMode) {
       return {
         systemPrompt,
-        userPrompt: `Ini adalah soal ujian isian / essay tanpa pilihan ganda (gambar soal terlampir).
-
+        userPrompt: `Ini adalah soal ujian isian / essay tanpa pilihan ganda (gambar bacaan/soal terlampir).
+${qTextContext}
 Instruksi Pengerjaan:
-1. Amati gambar soal secara utuh dan teliti (teks pertanyaan, titik-titik rumpang, rumus, nilai pada diagram).
+1. Baca seluruh teks pada gambar terlampir maupun teks pertanyaan di atas secara utuh dan teliti.
 2. Jika soal berbentuk melengkapi titik-titik / rumpang / angka singkat (misal "...nasional"), berikan HANYA kata/frasa/nilai pengisinya saja tanpa mengulang kalimat soal.
-3. Jika soal berbentuk uraian terbuka ("Jelaskan...", "Mengapa...", analisis/hitungan), tuliskan jawaban jelas dan ringkas dalam teks polos tanpa format Markdown.
+3. Jika soal berbentuk uraian / pertanyaan terbuka (seperti pemahaman bacaan Bahasa Inggris/Indonesia, hitungan, "What...", "Explain...", "Jelaskan..."), tuliskan jawaban yang jelas, tepat, dan langsung pada inti dalam bahasa pertanyaan menggunakan teks polos tanpa format Markdown.
 4. Di akhir respons, WAJIB sertakan kesimpulan dalam format JSON persis:
 {"choice": "", "answer": "teks jawaban final yang siap diketik langsung"}`
       };
@@ -2158,13 +2564,13 @@ Instruksi Pengerjaan:
     return {
       systemPrompt,
       userPrompt: `Ini adalah soal ujian pilihan ganda (gambar soal terlampir).
-${optionsText}
+${qTextContext}${optionsText}
 Instruksi Pengerjaan:
 1. Amati gambar soal secara utuh dan teliti (baca teks soal, rumus, nilai sudut/jari-jari/sisi pada diagram, dan tentukan apa yang dicari).
-2. Periksa SELURUH pilihan jawaban dari A sampai E yang ada di gambar / daftar pilihan.
+2. Periksa SELURUH pilihan jawaban yang ada di gambar / daftar pilihan.${multiHint}
 3. Lakukan perhitungan matematis secara seksama langkah demi langkah hingga tuntas (contoh: jika mencari luas daerah diarsir/tembereng, hitung luas juring lingkaran terlebih dahulu, lalu kurangkan dengan luas segitiga, jangan berhenti hanya di luas segitiga saja).
 4. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON persis:
-{"choice": "huruf pilihan (A/B/C/D/E)", "answer": "teks atau angka jawaban yang dipilih"}`
+{"choice": "${choiceFormatDesc}", "answer": "teks atau angka jawaban yang dipilih"}`
     };
   }
 
@@ -2188,13 +2594,13 @@ ${questionText}`
 
   return {
     systemPrompt,
-    userPrompt: `Kamu adalah asisten pemecah soal ujian pilihan ganda yang cerdas dan teliti. Analisis soal berikut dan tentukan satu jawaban yang paling tepat.
+    userPrompt: `Kamu adalah asisten pemecah soal ujian pilihan ganda yang cerdas dan teliti. Analisis soal berikut dan tentukan jawaban yang paling tepat.${multiHint}
 
 Instruksi Pengerjaan:
 1. Pahami pertanyaan dan pilihan jawaban secara mendalam.
 2. Analisis dan hitung langkah demi langkah hingga mendapatkan jawaban yang pasti.
 3. Di akhir respons, WAJIB sertakan kesimpulan jawaban dalam format JSON valid berikut:
-{"choice": "huruf pilihan kapital (A/B/C/D/E)", "answer": "teks pilihan jawaban yang dipilih"}
+{"choice": "${choiceFormatDesc}", "answer": "teks pilihan jawaban yang dipilih"}
 
 Soal:
 ${questionText}
@@ -2285,10 +2691,48 @@ async function saveOcrCache(fingerprint, data) {
   }
 }
 
+async function extractContentImagesFallback(scope) {
+  const d = scope || getQuizDocument() || document;
+  const imgs = Array.from(d.querySelectorAll('.qtext img, .formulation img')).filter(img => isContentImage(img));
+  for (const img of imgs) {
+    try {
+      if (img.complete && img.naturalWidth > 0) {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.naturalWidth;
+        canvas.height = img.naturalHeight;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        const dataUrl = canvas.toDataURL('image/png');
+        const base64 = dataUrl.split(',')[1] || '';
+        if (base64.length >= 50) {
+          return { mimeType: 'image/png', base64, dataUrl };
+        }
+      }
+    } catch (_) {
+      // Cross-origin canvas taint -> fallback proxyFetchViaBackground
+    }
+    const rawSrc = img.currentSrc || img.getAttribute('src') || img.src || '';
+    if (rawSrc && !rawSrc.startsWith('data:')) {
+      try {
+        const absUrl = new URL(rawSrc, window.location.href).href;
+        const proxyRes = await proxyFetchViaBackground(absUrl, { method: 'GET', responseType: 'dataUrl' });
+        if (proxyRes && proxyRes.ok && proxyRes.base64 && proxyRes.base64.length >= 50) {
+          return {
+            mimeType: proxyRes.mimeType || 'image/png',
+            base64: proxyRes.base64,
+            dataUrl: proxyRes.dataUrl
+          };
+        }
+      } catch (_) {}
+    }
+  }
+  return null;
+}
+
 // ======================================================
 // DIRECT AI SOLVER ENGINE (GEMINI, GROQ, OPENAI, CUSTOM + PADDLEOCR)
 // ======================================================
-async function solveWithDirectAI(qNum, questionText, options, config, doc) {
+async function solveWithDirectAI(qNum, questionText, options, config, doc, solverOpts = {}) {
   const d = doc || getQuizDocument() || document;
   const apiKey = config.aiApiKey;
   const provider = config.aiProvider || 'gemini';
@@ -2296,6 +2740,17 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
   const rawThreshDirect = config.matchThreshold !== undefined ? Number(config.matchThreshold) : 0.70;
   const threshold = rawThreshDirect > 1 ? rawThreshDirect / 100 : rawThreshDirect;
   const questionType = detectQuizInputType(d);
+  const isMultiChoice = Boolean(d.querySelector('.answer input[type="checkbox"]'));
+  const expectedCount = extractExpectedMultiChoiceCount(questionText);
+  const shouldContinue = solverOpts.shouldContinue || (() => isAgentRunning);
+  const resetCbBeforeApply = Boolean(solverOpts && solverOpts.resetCheckboxesFirst);
+  const applyDirectResult = async (parsedObj, minThresh) => {
+    if (!shouldContinue()) return { success: false, mode: 'Stopped' };
+    if (resetCbBeforeApply && parsedObj && (parsedObj.choice || parsedObj.answer)) {
+      clearCheckboxSelections(d);
+    }
+    return await applyAnswerToQuizDom(parsedObj, minThresh, d, shouldContinue);
+  };
   const ocrEnabled = config.ocrEnabled !== false;
   const ocrToken = String(config.paddleOcrToken || '').trim();
   const ocrModel = String(config.paddleOcrModel || 'PaddleOCR-VL-1.6').trim() || 'PaddleOCR-VL-1.6';
@@ -2305,13 +2760,15 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
     showToast("", "API Key belum diatur", "error");
     logAgentActivity("❌ Gagal: AI API Key belum diatur di menu Pengaturan. Agen dihentikan.");
     isAgentRunning = false;
-    chrome.storage.local.set({ agentState: { status: 'idle' } });
+    setAgentState({ agentState: { status: 'idle' } });
     return { success: false, mode: 'Config Error' };
   }
 
   const hasImage = checkForImageTags(d);
   const supportsVision = (provider === 'gemini' || provider === 'custom' || provider === 'openai');
-  const canUseOcr = hasImage && ocrEnabled && Boolean(ocrToken) && Boolean(globalThis.KamusMiniOcr);
+  const speedVision = hasImage && supportsVision && config.imageProcessingMode !== 'ocr_first';
+  if (speedVision) logAgentActivity(`[Soal ${qNum}] Mode Cepat: screenshot langsung ke AI Vision, tanpa PaddleOCR.`);
+  const canUseOcr = !speedVision && hasImage && ocrEnabled && Boolean(ocrToken) && Boolean(globalThis.KamusMiniOcr);
   const qFingerprint = buildQuestionFingerprint(qNum, d);
 
   // 1. CEK CACHE OCR (TAHAP 2) SEBELUM SCREENSHOT & SEBELUM CALL PADDLEOCR
@@ -2351,6 +2808,8 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
 
     const { systemPrompt: aiSystemPrompt, userPrompt: ocrUserPrompt } = buildDirectAiPrompts({
       questionType,
+      isMultiChoice,
+      expectedCount,
       mode: 'ocr',
       ocrMarkdown: cachedOcr.cleanMarkdown,
       options,
@@ -2399,7 +2858,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       aiModel: aiResp.model
     });
 
-    const matched = await applyAnswerToQuizDom(parsed, 0.60, d);
+    const matched = await applyDirectResult(parsed, 0.60);
     const modeLabel = (ocrMode === 'OCR_VISION_CROP') ? 'PaddleOCR + Vision Crop (Cache)' : 'PaddleOCR + Text AI (Cache)';
     if (matched.success) {
       logAgentActivity(`[Soal ${qNum}] ${modeLabel} Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
@@ -2416,11 +2875,51 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
     let base64Data = "";
     let imageKB = 0;
     let dataUrlFull = "";
+    let attachedMimeType = "image/png";
 
     try {
-      logAgentActivity(`[Soal ${qNum}] Terdeteksi Gambar/Rumus. Mengambil tangkapan layar (.formulation)...`);
-      const imageBlob = await captureFormulationElement(d, captureDiag);
+      let imageBlob = solverOpts?.preCapturedBlob || null;
       if (!imageBlob) {
+        logAgentActivity(`[Soal ${qNum}] Terdeteksi Gambar/Rumus. Mengambil tangkapan layar soal...`);
+        imageBlob = await captureFormulationElement(d, captureDiag);
+      }
+
+      if (imageBlob) {
+        base64Data = await blobToBase64(imageBlob);
+        attachedMimeType = imageBlob.type || 'image/png';
+        imageKB = Number((imageBlob.size / 1024).toFixed(1));
+        dataUrlFull = `data:${attachedMimeType};base64,${base64Data}`;
+
+        saveCapturedDebugPreview({
+          ts: new Date().toISOString(),
+          qNum,
+          failed: false,
+          width: captureDiag.canvasSize?.width || null,
+          height: captureDiag.canvasSize?.height || null,
+          slices: captureDiag.slices?.length || 1,
+          sizeKB: imageKB,
+          base64Len: base64Data.length,
+          isLikelyBlank: captureDiag.blankCheck?.isLikelyBlank || false,
+          nonWhitePixels: captureDiag.blankCheck?.nonWhitePixels ?? null,
+          overlaysHidden: captureDiag.overlaysHidden || [],
+          sourceType: captureDiag.sourceType || 'unknown',
+          scrollContainer: captureDiag.scrollContainer || '',
+          dataUrlPreview: base64Data.length <= 2000000 ? dataUrlFull : null
+        });
+      }
+
+      if (!base64Data || base64Data.length < 50) {
+        const directImg = await extractContentImagesFallback(d);
+        if (directImg && directImg.base64) {
+          base64Data = directImg.base64;
+          attachedMimeType = directImg.mimeType || 'image/png';
+          dataUrlFull = directImg.dataUrl || `data:${attachedMimeType};base64,${base64Data}`;
+          imageKB = Number(((base64Data.length * 0.75) / 1024).toFixed(1));
+          logAgentActivity(`[Soal ${qNum}] Mengambil gambar <img> langsung (${imageKB} KB) sebagai fallback screenshot...`);
+        }
+      }
+
+      if (!base64Data || base64Data.length < 50) {
         const detail = captureDiag.failReason || "alasan tidak diketahui";
         saveCapturedDebugPreview({
           ts: new Date().toISOString(),
@@ -2430,38 +2929,14 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           diag: captureDiag,
           dataUrlPreview: null
         });
-        throw new Error(`Gagal memotong tangkapan layar (${detail})`);
-      }
-
-      base64Data = await blobToBase64(imageBlob);
-      imageKB = Number((imageBlob.size / 1024).toFixed(1));
-      dataUrlFull = `data:image/png;base64,${base64Data}`;
-
-      saveCapturedDebugPreview({
-        ts: new Date().toISOString(),
-        qNum,
-        failed: false,
-        width: captureDiag.canvasSize?.width || null,
-        height: captureDiag.canvasSize?.height || null,
-        slices: captureDiag.slices?.length || 1,
-        sizeKB: imageKB,
-        base64Len: base64Data.length,
-        isLikelyBlank: captureDiag.blankCheck?.isLikelyBlank || false,
-        nonWhitePixels: captureDiag.blankCheck?.nonWhitePixels ?? null,
-        overlaysHidden: captureDiag.overlaysHidden || [],
-        sourceType: captureDiag.sourceType || 'unknown',
-        scrollContainer: captureDiag.scrollContainer || '',
-        dataUrlPreview: base64Data.length <= 2000000 ? dataUrlFull : null
-      });
-
-      if (!base64Data || base64Data.length < 50) {
-        throw new Error(`Hasil encoding base64 gambar terlalu kecil/kosong (len=${base64Data ? base64Data.length : 0})`);
+        throw new Error(`Gagal memperoleh gambar soal (${detail})`);
       }
     } catch (captureErr) {
-      logDebugEvent('AI_VISION', 'ERROR', `Capture tangkapan layar gagal -> dialihkan ke Text: ${captureErr.message}`, {
+      logDebugEvent('AI_VISION', 'ERROR', `Capture gambar soal gagal${speedVision ? '' : ' -> dialihkan ke Text'}: ${captureErr.message}`, {
         qNum, error: captureErr.message, captureDiag
       });
-      logAgentActivity(`❌ [Soal ${qNum}] Capture gagal, dialihkan ke Text: ${captureErr.message}`);
+      logAgentActivity(`❌ [Soal ${qNum}] Capture gagal${speedVision ? '' : ', dialihkan ke Text'}: ${captureErr.message}`);
+      if (speedVision) return { success: false, mode: 'Speed Vision Capture Failed' };
       base64Data = "";
     }
 
@@ -2480,7 +2955,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           token: ocrToken,
           model: ocrModel,
           jobUrl: ocrJobUrl,
-          shouldAbort: () => !isAgentRunning,
+          shouldAbort: () => !shouldContinue(),
           onProgress: (p) => {
             if (p.stage === 'submitted') {
               logDebugEvent('OCR', 'INFO', `Job PaddleOCR dibuat (jobId=${p.jobId})`, { qNum, jobId: p.jobId });
@@ -2539,6 +3014,8 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
 
         const { systemPrompt: aiSystemPrompt, userPrompt: ocrUserPrompt } = buildDirectAiPrompts({
           questionType,
+          isMultiChoice,
+          expectedCount,
           mode: 'ocr',
           ocrMarkdown: ocrRes.cleanMarkdown,
           options,
@@ -2587,7 +3064,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           aiModel: aiResp.model
         });
 
-        const matched = await applyAnswerToQuizDom(parsed, 0.60, d);
+        const matched = await applyDirectResult(parsed, 0.60);
         const modeLabel = (ocrMode === 'OCR_VISION_CROP') ? 'PaddleOCR + Vision Crop' : 'PaddleOCR + Text AI';
         if (matched.success) {
           logAgentActivity(`[Soal ${qNum}] ${modeLabel} Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
@@ -2618,7 +3095,10 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       try {
         const { systemPrompt: visionSystemPrompt, userPrompt: promptText } = buildDirectAiPrompts({
           questionType,
+          isMultiChoice,
+          expectedCount,
           mode: 'vision',
+          questionText,
           options
         });
 
@@ -2638,7 +3118,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           config,
           systemPrompt: visionSystemPrompt,
           userPrompt: promptText,
-          images: [{ mimeType: 'image/png', base64: base64Data, dataUrl: dataUrlFull }]
+          images: [{ mimeType: attachedMimeType, base64: base64Data, dataUrl: dataUrlFull }]
         });
 
         const parsed = parseAiResponse(aiResp.rawReply, questionType);
@@ -2659,20 +3139,22 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
           aiModel: aiResp.model
         });
 
-        const matched = await applyAnswerToQuizDom(parsed, 0.60, d);
+        const matched = await applyDirectResult(parsed, 0.60);
         if (matched.success) {
-          logAgentActivity(`[Soal ${qNum}] Direct AI (Vision) Sukses! Memilih ${parsed.choice || 'Jawaban'}. (${parsed.answer || ''})`);
+          const actionVerb = (questionType === 'choice') ? `Memilih ${parsed.choice || 'Jawaban'}` : 'Mengetik jawaban';
+          logAgentActivity(`[Soal ${qNum}] Direct AI (Vision) Sukses! ${actionVerb}. (${parsed.answer || ''})`);
           return { success: true, mode: 'Direct AI Vision' };
         } else {
           logAgentActivity(`⚠️ [Soal ${qNum}] AI Vision menjawab choice="${parsed.choice || ''}" (${String(parsed.answer || '').slice(0, 120)}), tidak cocok ke elemen opsi.`);
           return { success: false, mode: 'Direct AI Vision (No Choice)' };
         }
       } catch (err) {
-        logDebugEvent('AI_VISION', 'ERROR', `Direct AI Vision gagal -> dialihkan ke Text: ${err.message}`, {
+        logDebugEvent('AI_VISION', 'ERROR', `Direct AI Vision gagal${speedVision ? '' : ' -> dialihkan ke Text'}: ${err.message}`, {
           qNum, error: err.message, captureDiag
         });
-        logAgentActivity(`❌ [Soal ${qNum}] Direct AI Vision dialihkan ke Text: ${err.message}`);
+        logAgentActivity(`❌ [Soal ${qNum}] Direct AI Vision gagal${speedVision ? '' : ', dialihkan ke Text'}: ${err.message}`);
         console.warn(err);
+        if (speedVision) return { success: false, mode: 'Speed Vision Failed' };
       }
     }
   }
@@ -2691,6 +3173,8 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
 
     const { systemPrompt: textSystemPrompt, userPrompt: promptText } = buildDirectAiPrompts({
       questionType,
+      isMultiChoice,
+      expectedCount,
       mode: 'text',
       questionText,
       options
@@ -2723,7 +3207,7 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
       aiModel: aiResp.model
     });
 
-    const matched = await applyAnswerToQuizDom(parsed, threshold, d);
+    const matched = await applyDirectResult(parsed, threshold);
     if (matched.success) {
       const actionVerb = (questionType === 'choice') ? `Memilih ${parsed.choice || 'Jawaban'}` : 'Mengetik jawaban';
       logAgentActivity(`[Soal ${qNum}] Direct AI Sukses! ${actionVerb}. (${parsed.answer || ''})`);
@@ -2743,8 +3227,9 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc) {
 // ======================================================
 // TWO-LEVEL NESTED FALLBACK / DUAL-ENGINE CORE SOLVER
 // ======================================================
-async function solveQuestionFlow(qNum, doc) {
-  const d = doc || getQuizDocument() || document;
+async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue = () => isAgentRunning) {
+  if (!shouldContinue()) return { success: false, mode: 'Stopped' };
+  const { doc: rootDoc, scope: d } = resolveQuizDocAndScope(targetScope || doc);
   const config = await new Promise(r => chrome.storage.local.get([
     'solverEngine',
     'aiProvider',
@@ -2752,6 +3237,7 @@ async function solveQuestionFlow(qNum, doc) {
     'aiModel',
     'aiCustomBaseUrl',
     'aiCustomModel',
+    'imageProcessingMode',
     'ocrEnabled',
     'paddleOcrToken',
     'paddleOcrModel',
@@ -2761,19 +3247,21 @@ async function solveQuestionFlow(qNum, doc) {
     'matchThreshold',
     'selectedModelId'
   ], r));
+  if (!shouldContinue()) return { success: false, mode: 'Stopped' };
 
   const engine = config.solverEngine || 'direct_ai';
   const questionType = detectQuizInputType(d);
   const questionText = scrapeQuestionText(d);
   const options = scrapeOptionsText(d);
-  const ctxInfo = findQuizContextInRoot(document, d);
-  const imgStats = inspectFormulationImages(d.querySelector('.formulation'));
+  const ctxInfo = findQuizContextInRoot(document, rootDoc);
+  const imgStats = inspectFormulationImages(d.querySelector('.formulation') || d);
 
   logDebugEvent('SOLVER', 'INFO', `Memulai pengerjaan Soal #${qNum}`, {
     engine,
     questionType,
     provider: config.aiProvider || 'gemini',
     model: (config.aiProvider === 'custom') ? (config.aiCustomModel || config.aiModel) : (config.aiModel || 'default'),
+    imageProcessingMode: config.imageProcessingMode === 'ocr_first' ? 'ocr_first' : 'vision_first',
     ocrEnabled: config.ocrEnabled !== false,
     hasOcrToken: Boolean((config.paddleOcrToken || '').trim()),
     ocrModel: config.paddleOcrModel || 'PaddleOCR-VL-1.6',
@@ -2790,7 +3278,7 @@ async function solveQuestionFlow(qNum, doc) {
     if (engine !== 'direct_ai' && !CLOUD_BACKEND_READY) {
       logAgentActivity(`[Soal ${qNum}] Kamus Mini Cloud masih Coming Soon -> dialihkan ke Direct AI.`);
     }
-    return await solveWithDirectAI(qNum, questionText, options, config, d);
+    return await solveWithDirectAI(qNum, questionText, options, config, d, { shouldContinue });
   }
 
   // JIKA MENGGUNAKAN KAMUS MINI CLOUD (mylms.melvino.online)
@@ -2803,15 +3291,50 @@ async function solveQuestionFlow(qNum, doc) {
     showToast("", "Cloud Key kosong", "error");
     logAgentActivity("❌ Gagal: API Key Kamus Mini Cloud belum diatur. Agen dihentikan.");
     isAgentRunning = false;
-    chrome.storage.local.set({ agentState: { status: 'idle' } });
+    setAgentState({ agentState: { status: 'idle' } });
     return { success: false, mode: 'Config Error' };
   }
   
-  // 0. Cek Awal: Deteksi Gambar -> Langsung Fallback 2 (Math Mode)
+  const fallbackCtx = { questionText, options, config, shouldContinue };
+
+  // 0. Cek Awal: Deteksi Gambar -> Langsung Fallback 2 (Math Mode / Direct AI Vision fallback)
   if (checkForImageTags(d)) {
-    logAgentActivity(`[Soal ${qNum}] Terdeteksi Gambar/Rumus. Langsung dialihkan ke Fallback 2 (Cloud Math Mode).`);
-    return await executeFallback2(qNum, baseUrl, apiKey, threshold, d);
+    logAgentActivity(`[Soal ${qNum}] Terdeteksi Gambar/Rumus. Menggunakan ${config.imageProcessingMode === 'ocr_first' ? 'Cloud OCR' : 'Cloud Vision Cepat' }.`);
+    return await executeFallback2(qNum, baseUrl, apiKey, threshold, d, fallbackCtx);
   }
+
+  const hasCheckboxes = Boolean(d.querySelector('.answer input[type="checkbox"]'));
+  const expectedMultiCount = hasCheckboxes ? extractExpectedMultiChoiceCount(questionText) : 0;
+  const isMultiAnswerQuestion = hasCheckboxes && (expectedMultiCount >= 2 || /possible ones|all that apply|more than one|click on all|lebih dari satu/i.test(questionText));
+  const hasDirectAiFallback = Boolean((config.aiApiKey || '').trim()) || (config.aiProvider === 'custom');
+
+  const tryApplyCloudResponse = async (res, data, modeLabel, attemptLabel) => {
+    if ((res && !res.ok) || !data || data.aiQuotaExceeded || (!data.answer && !data.choice) || Number(data.matchScore || 0) < threshold) {
+      return null;
+    }
+    const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d, shouldContinue);
+    if (!match.success) return null;
+
+    const matchedCount = match.count || 1;
+    const isIncompleteMulti = isMultiAnswerQuestion && (
+      expectedMultiCount >= 2 ? matchedCount < expectedMultiCount : matchedCount === 1
+    );
+
+    if (isIncompleteMulti) {
+      if (hasDirectAiFallback) {
+        logAgentActivity(`⚠️ [Soal ${qNum}] Cloud (${attemptLabel}) hanya mengembalikan ${matchedCount} dari ${expectedMultiCount || 'beberapa'} jawaban checkbox. Menyempurnakan via Direct AI...`);
+        const aiRefined = await solveWithDirectAI(qNum, questionText, options, config, d, { resetCheckboxesFirst: true, shouldContinue });
+        if (aiRefined && aiRefined.success) {
+          return aiRefined;
+        }
+      } else {
+        logAgentActivity(`⚠️ [Soal ${qNum}] Cloud hanya mengembalikan ${matchedCount} jawaban untuk soal checkbox multi-jawaban (prompt fallback server memaksa "Pilih SATU"). Atur API Key Direct AI di Pengaturan atau perbarui prompt backend.`);
+      }
+    }
+
+    logAgentActivity(`[Soal ${qNum}] ${attemptLabel} Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+    return { success: true, mode: modeLabel, score: data.matchScore };
+  };
 
   // ==========================================
   // ATTEMPT 1: Fast Text Search (Soal Saja)
@@ -2823,16 +3346,13 @@ async function solveQuestionFlow(qNum, doc) {
       options: null, // Attempt 1: teks soal saja
       modelId: config.selectedModelId || null
     });
-    if (limit) {
-      logAgentActivity(`[Soal ${qNum}] AI dilimit (${limit.reasonCode}). Tunggu ${limit.retryAfterSeconds}s. DB lookup tetap jalan untuk soal ini.`);
+    if (limit || data?.aiQuotaExceeded) {
+      const waitSec = limit?.retryAfterSeconds || '?';
+      const reason = limit?.reasonCode || 'QUOTA';
+      logAgentActivity(`[Soal ${qNum}] AI dilimit (${reason}). Tunggu ${waitSec}s. DB lookup tetap jalan untuk soal ini.`);
     }
-    if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
-      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
-      if (match.success) {
-        logAgentActivity(`[Soal ${qNum}] Attempt 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
-        return { success: true, mode: 'Cloud Fast Text', score: data.matchScore };
-      }
-    }
+    const applied = await tryApplyCloudResponse(res, data, 'Cloud Fast Text', 'Attempt 1');
+    if (applied) return applied;
   } catch (err) {
     console.warn(`[Soal ${qNum}] Attempt 1 mengalami error:`, err);
   }
@@ -2847,16 +3367,13 @@ async function solveQuestionFlow(qNum, doc) {
       options: options,
       modelId: config.selectedModelId || null
     });
-    if (limit) {
-      logAgentActivity(`[Soal ${qNum}] AI dilimit (${limit.reasonCode}). Tunggu ${limit.retryAfterSeconds}s. DB lookup tetap jalan untuk soal ini.`);
+    if (limit || data?.aiQuotaExceeded) {
+      const waitSec = limit?.retryAfterSeconds || '?';
+      const reason = limit?.reasonCode || 'QUOTA';
+      logAgentActivity(`[Soal ${qNum}] AI dilimit (${reason}). Tunggu ${waitSec}s. DB lookup tetap jalan untuk soal ini.`);
     }
-    if ((data.answer || data.choice) && Number(data.matchScore || 0) >= threshold) {
-      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d);
-      if (match.success) {
-        logAgentActivity(`[Soal ${qNum}] Fallback 1 Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
-        return { success: true, mode: 'Cloud Refined Text', score: data.matchScore };
-      }
-    }
+    const applied = await tryApplyCloudResponse(res, data, 'Cloud Refined Text', 'Fallback 1');
+    if (applied) return applied;
   } catch (err) {
     console.warn(`[Soal ${qNum}] Fallback 1 mengalami error:`, err);
   }
@@ -2865,38 +3382,79 @@ async function solveQuestionFlow(qNum, doc) {
   // FALLBACK 2: Math Mode (Screenshot & OCR Cloud)
   // ==========================================
   logAgentActivity(`[Soal ${qNum}] Fallback 1 Gagal/Skor Rendah. Mencoba Fallback 2 (Cloud Math Mode)...`);
-  return await executeFallback2(qNum, baseUrl, apiKey, threshold, d);
+  return await executeFallback2(qNum, baseUrl, apiKey, threshold, d, fallbackCtx);
 }
 
-// Asynchronous execution of Fallback 2 (mendukung multipart langsung & background proxy fallback)
-async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc) {
+// Asynchronous execution of Fallback 2 (mendukung multipart langsung & background proxy fallback + Direct AI Vision fallback)
+async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc, fallbackCtx = null) {
+  const shouldContinue = fallbackCtx?.shouldContinue || (() => isAgentRunning);
+  if (!shouldContinue()) return { success: false, mode: 'Stopped' };
   const d = doc || getQuizDocument() || document;
+  const imageProcessingMode = fallbackCtx?.config?.imageProcessingMode === 'ocr_first' ? 'ocr_first' : 'vision_first';
+  const cloudVision = imageProcessingMode === 'vision_first';
+  const questionType = detectQuizInputType(d);
+  const questionText = fallbackCtx?.questionText || scrapeQuestionText(d);
+  const options = fallbackCtx?.options || scrapeOptionsText(d);
+  const isMultiChoice = Boolean(d.querySelector('.answer input[type="checkbox"]'));
+  const expectedCount = isMultiChoice ? extractExpectedMultiChoiceCount(questionText) : 0;
+  let imageBlob = null;
   try {
-    const imageBlob = await captureFormulationElement(d);
+    logAgentActivity(`[Soal ${qNum}] Cloud ${cloudVision ? 'Vision Cepat: langsung ke AI, tanpa OCR' : 'OCR: ekstraksi gambar dahulu'}...`);
+    imageBlob = await captureFormulationElement(d);
     if (!imageBlob) {
-      throw new Error("Gagal memotong tangkapan layar elemen");
+      const imgFallback = await extractContentImagesFallback(d);
+      if (imgFallback && imgFallback.base64) {
+        const bin = atob(imgFallback.base64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        imageBlob = new Blob([bytes], { type: imgFallback.mimeType || 'image/png' });
+      }
+    }
+    if (!imageBlob) {
+      throw new Error("Gagal memotong tangkapan layar maupun mengambil <img> soal");
     }
 
-    // `config` (dari solveQuestionFlow) tidak berada di scope fungsi ini —
-    // ambil preferensi model langsung dari storage.
     const modelCfg = await new Promise(r => chrome.storage.local.get(['selectedModelId'], r));
+    const selectedId = (fallbackCtx && fallbackCtx.config && fallbackCtx.config.selectedModelId) || modelCfg.selectedModelId || null;
     const { res, body: data, limit } = await KamusMiniCloud.searchAnswerImage(apiKey, {
-      imageBlob, filename: `question_${qNum}.png`, modelId: modelCfg.selectedModelId || null
+      imageBlob, filename: `question_${qNum}.png`, modelId: selectedId,
+      imageProcessingMode, questionText, options, questionType, isMultiChoice, expectedCount
     });
-    if (limit) {
-      logAgentActivity(`[Soal ${qNum}] AI dilimit (${limit.reasonCode}). Tunggu ${limit.retryAfterSeconds}s.`);
+    if (limit || data?.aiQuotaExceeded) {
+      const waitSec = limit?.retryAfterSeconds || '?';
+      const reason = limit?.reasonCode || 'QUOTA';
+      logAgentActivity(`[Soal ${qNum}] AI Cloud dilimit (${reason}). Tunggu ${waitSec}s.`);
     }
 
-    if (data && (data.answer || data.choice)) {
-      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, 0.60, d);
+    if (data?.timings) logDebugEvent('CLOUD', 'INFO', `Waktu server soal #${qNum} (${data.imageProcessingMode || imageProcessingMode})`, { qNum, ...data.timings });
+    if (cloudVision && (!res?.ok || limit || data?.aiQuotaExceeded || data?.imageProcessingMode !== 'vision_first')) {
+      throw new Error(data?.message || data?.error || limit?.message || 'Server belum menjalankan Mode Cepat Cloud. Perbarui backend atau pilih OCR dahulu.');
+    }
+    const isValidSuccess = Boolean(res && res.ok && !limit && !data?.aiQuotaExceeded);
+    if (isValidSuccess && data && (data.answer || data.choice)) {
+      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, 0.60, d, shouldContinue);
       if (match.success) {
-        logAgentActivity(`[Soal ${qNum}] Fallback 2 (Cloud Math Mode) Sukses! Skor Match: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
-        return { success: true, mode: 'Cloud Math OCR', score: data.matchScore };
+        logAgentActivity(`[Soal ${qNum}] ${cloudVision ? 'Cloud Vision Cepat' : 'Cloud OCR'} Sukses! Skor Match: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+        return { success: true, mode: cloudVision ? 'Cloud AI Vision' : 'Cloud Math OCR', score: data.matchScore };
       }
     }
   } catch (err) {
-    logAgentActivity(`❌ [Soal ${qNum}] Fallback 2 Gagal: ${err.message}`);
+    logAgentActivity(`❌ [Soal ${qNum}] Fallback 2 Cloud Gagal: ${err.message}`);
     console.error(`[Soal ${qNum}] Fallback 2 mengalami error:`, err);
+    if (cloudVision) return { success: false, mode: 'Cloud Vision Failed', error: err.message };
+  }
+
+  if (cloudVision) return { success: false, mode: 'Cloud Vision Failed', error: 'Jawaban Vision tidak dapat diterapkan ke soal. Tidak mencoba OCR otomatis.' };
+
+  // Fallback otomatis ke Direct AI Vision jika Cloud gagal / tidak menemukan jawaban (sangat berguna untuk Essay bergambar)
+  const cfg = fallbackCtx && fallbackCtx.config;
+  const canUseDirectAi = Boolean(cfg && ((cfg.aiApiKey || '').trim() || cfg.aiProvider === 'custom'));
+  if (canUseDirectAi) {
+    logAgentActivity(`⚠️ [Soal ${qNum}] Cloud Image tidak memberi jawaban valid. Mengalihkan otomatis ke Direct AI Vision...`);
+    return await solveWithDirectAI(qNum, fallbackCtx.questionText || scrapeQuestionText(d), fallbackCtx.options || scrapeOptionsText(d), cfg, d, {
+      shouldContinue,
+      preCapturedBlob: imageBlob || null
+    });
   }
 
   logAgentActivity(`⚠️ [Soal ${qNum}] Lewati Soal. Seluruh metode pencarian gagal.`);
@@ -3108,6 +3666,8 @@ async function startAgentLoop() {
   }
   if (!isAgentRunning || isSolvingActive) return;
 
+  const generation = agentGeneration;
+  const shouldContinue = () => isAgentRunning && agentGeneration === generation;
   const doc = getQuizDocument();
   if (!doc) {
     logAgentActivity("⚠️ Tidak ada elemen kuis (.formulation) di halaman atau frame ini.");
@@ -3127,30 +3687,76 @@ async function startAgentLoop() {
       return;
     }
 
-    // 2. Dapatkan nomor soal aktif dan teks soal untuk identifikasi unik
-    const { qNum, questionKey } = getCurrentQuestionIdentity(doc);
+    // 2. Kumpulkan seluruh soal yang dapat dijawab pada halaman ini (1 soal atau banyak soal sekaligus)
+    const allQuestions = getPageQuestions(doc);
+    const pendingQuestions = allQuestions.filter(q => !solvedQuestionKeys.has(getQuestionIdentityFromElement(q).questionKey));
+    if (pendingQuestions.length === 0) {
+      return;
+    }
 
-    lastSolvedQuestionKey = questionKey;
-    lastObservedQNum = qNum;
+    const pageIdentity = getCurrentQuestionIdentity(doc);
+    lastSolvedQuestionKey = pageIdentity.questionKey;
 
-    showToast("", `Soal #${qNum}...`, 'info');
+    if (pendingQuestions.length > 1) {
+      logAgentActivity(`📋 Terdeteksi ${pendingQuestions.length} soal pada halaman ini. Memproses berurutan...`);
+    }
 
-    // 3. Jalankan alur pengerjaan soal
-    await solveQuestionFlow(qNum, doc);
+    // 3. Kerjakan seluruh soal pada halaman ini satu per satu secara terisolasi
+    for (let i = 0; i < pendingQuestions.length; i++) {
+      if (!shouldContinue()) return;
+
+      const queScope = pendingQuestions[i];
+      const { qNum, questionKey: itemKey } = getQuestionIdentityFromElement(queScope);
+      lastObservedQNum = qNum;
+
+      if (allQuestions.length > 1 && queScope !== doc) {
+        await smoothScrollTo(queScope, { block: 'smart', topOffset: 88 });
+      }
+
+      const progressSuffix = pendingQuestions.length > 1 ? ` (${i + 1}/${pendingQuestions.length})` : '';
+      showToast("", `Soal #${qNum}${progressSuffix}...`, 'info');
+
+      const questionStartedAt = Date.now();
+      const result = await solveQuestionFlow(qNum, doc, queScope, shouldContinue);
+      logDebugEvent('SOLVER', result?.success ? 'SUCCESS' : 'WARN', `Total pengerjaan soal #${qNum}: ${((Date.now() - questionStartedAt) / 1000).toFixed(1)} detik`, {
+        qNum, totalDurationMs: Date.now() - questionStartedAt, mode: result?.mode, success: Boolean(result?.success)
+      });
+      if (!shouldContinue()) return;
+      if (!result?.success) {
+        logAgentActivity(`[Soal ${qNum}] Gagal dijawab: ${result?.error || result?.mode || 'Tidak ada jawaban valid'}. Agen berhenti; tekan Start untuk mencoba lagi.`);
+        showToast("", `Gagal · #${qNum}`, 'warning');
+        isAgentRunning = false;
+        clearPendingAgentTimer();
+        setAgentState({ agentState: { status: 'idle', message: result?.error || `Gagal menjawab soal #${qNum}` } });
+        return;
+      }
+      solvedQuestionKeys.add(itemKey);
+
+      if (!shouldContinue()) return;
+      if (i < pendingQuestions.length - 1) {
+        await new Promise(r => setTimeout(r, 350));
+      }
+    }
 
     // Pasang sniffer ke tombol navigasi jika user klik manual nanti
     attachNextButtonSniffer(doc);
 
     // 4. Cek kelanjutan
-    if (!isAgentRunning) return; // Jika disetop manual saat pengerjaan
+    if (!shouldContinue()) return; // Jika disetop manual saat pengerjaan
 
     // 5. Cek Mode Navigasi (Semi-Auto vs Full-Auto)
     const navStorage = await new Promise(r => chrome.storage.local.get(['navigationMode', 'baselineDelay', 'agentState'], r));
+    if (!shouldContinue()) return;
     const isSemiAuto = (navStorage.navigationMode !== 'full_auto'); // Default: semi_auto
 
     if (isSemiAuto) {
-      logAgentActivity(`✅ [Semi-Auto] Soal #${qNum} selesai dijawab. Silakan periksa jawaban Anda dan tekan tombol Selanjutnya/Next secara manual.`);
-      showToast("", `Dipilih · #${qNum}`, "success");
+      if (pendingQuestions.length > 1) {
+        logAgentActivity(`✅ [Semi-Auto] Seluruh ${pendingQuestions.length} soal di halaman ini selesai dijawab. Silakan periksa jawaban lalu tekan tombol Next/Finish.`);
+        showToast("", `Dipilih · ${pendingQuestions.length} soal`, "success");
+      } else {
+        logAgentActivity(`✅ [Semi-Auto] Soal #${lastObservedQNum} selesai dijawab. Silakan periksa jawaban Anda dan tekan tombol Selanjutnya/Next secara manual.`);
+        showToast("", `Dipilih · #${lastObservedQNum}`, "success");
+      }
       return;
     }
 
@@ -3162,7 +3768,7 @@ async function startAgentLoop() {
       showToast("", "Siap Submit · Selesai", "success");
       isAgentRunning = false;
       clearPendingAgentTimer();
-      chrome.storage.local.set({ agentState: { status: 'completed' } });
+      setAgentState({ agentState: { status: 'completed' } });
       return;
     }
 
@@ -3179,10 +3785,11 @@ async function startAgentLoop() {
       isPendingNextNavigation = true;
       const priorSameCount = Number(navStorage.agentState?.samePageNavCount || 0);
       const navPageUrl = window.location.href;
+      const checkpointKey = pageIdentity.questionKey;
 
       agentLoopTimeout = setTimeout(async () => {
         agentLoopTimeout = null;
-        if (!isAgentRunning) {
+        if (!shouldContinue()) {
           isPendingNextNavigation = false;
           return;
         }
@@ -3190,12 +3797,12 @@ async function startAgentLoop() {
         // Catat checkpoint sebelum submit/navigasi agar reload halaman yang identik beruntun bisa dideteksi
         try {
           await new Promise(resolve => {
-            chrome.storage.local.set({
+            setAgentState({
               agentState: {
                 status: 'running',
                 pendingAutoNext: true,
                 lastAutoNavUrl: navPageUrl,
-                lastAutoNavKey: questionKey,
+                lastAutoNavKey: checkpointKey,
                 samePageNavCount: priorSameCount
               }
             }, resolve);
@@ -3204,7 +3811,7 @@ async function startAgentLoop() {
 
         logAgentActivity(`➡ Menekan tombol "${navTarget.label || 'Next page'}" ke halaman kuis berikutnya...`);
         await smoothScrollTo(targetNextBtn);
-        if (!isAgentRunning) {
+        if (!shouldContinue()) {
           isPendingNextNavigation = false;
           return;
         }
@@ -3221,7 +3828,7 @@ async function startAgentLoop() {
       showToast("", "Selesai", "success");
       isAgentRunning = false;
       clearPendingAgentTimer();
-      chrome.storage.local.set({ agentState: { status: 'completed' } });
+      setAgentState({ agentState: { status: 'completed' } });
     }
   } finally {
     isSolvingActive = false;
@@ -3239,17 +3846,14 @@ function checkAndAutoSolveNewQuestion() {
   const doc = getQuizDocument();
   if (!doc) return;
 
-  const formulation = doc.querySelector('.formulation');
-  if (!formulation) return;
+  const questions = getPageQuestions(doc);
+  if (questions.length === 0) return;
 
-  const qtextEl = doc.querySelector('.qtext');
-  if (!qtextEl) return;
-
-  const { qNum, questionKey: currentKey } = getCurrentQuestionIdentity(doc);
-
-  if (currentKey !== lastSolvedQuestionKey) {
+  const firstUnsolved = questions.find(q => !solvedQuestionKeys.has(getQuestionIdentityFromElement(q).questionKey));
+  if (firstUnsolved) {
     isPendingNextNavigation = false;
-    logAgentActivity(`🔄 Terdeteksi soal baru (#${qNum}). Menjawab otomatis...`);
+    const { qNum } = getQuestionIdentityFromElement(firstUnsolved);
+    logAgentActivity(`🔄 Terdeteksi soal belum terjawab (#${qNum}). Menjawab otomatis...`);
     startAgentLoop();
   } else if (isPendingNextNavigation) {
     return;
@@ -3276,58 +3880,72 @@ window.addEventListener('popstate', () => {
 
 // ---- MESSAGE LISTENER FROM POPUP ----
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
-  if (request.action === 'startAgent') {
-    if (isManagedByTopFrame()) return false;
-    const doc = getQuizDocument();
-    if (!doc || !doc.querySelector('.formulation')) {
-      sendResponse({ success: false, reason: "no_quiz_in_frame" });
-      return true;
+  if (!['startAgent', 'stopAgent', 'searchAnswer'].includes(request.action)) return false;
+  if (isManagedByTopFrame()) return false;
+  if (request.action === 'startAgent' && !getQuizDocument()) return false;
+  agentTabReady.then(() => {
+    if (request.action === 'startAgent') {
+      if (isManagedByTopFrame()) return false;
+      const doc = getQuizDocument();
+      if (!doc || !doc.querySelector('.formulation')) {
+        sendResponse({ success: false, reason: "no_quiz_in_frame" });
+        return true;
+      }
+      if (!isAgentRunning) {
+        isAgentRunning = true;
+        resetSolvedQuestionTracking(); // Reset agar mengeksekusi seluruh soal di halaman aktif
+        clearPendingAgentTimer();
+        setAgentState({
+          agentState: {
+            status: 'running',
+            pendingAutoNext: false,
+            lastAutoNavUrl: null,
+            lastAutoNavKey: null,
+            samePageNavCount: 0
+          }
+        });
+        logAgentActivity("🚀 AI Agent Auto-Solver dinyalakan oleh pengguna.");
+        startAgentLoop();
+      }
+      sendResponse({ success: true, status: "running" });
     }
-    if (!isAgentRunning) {
-      isAgentRunning = true;
-      lastSolvedQuestionKey = null; // Reset agar langsung mengeksekusi soal yang sedang aktif
+    else if (request.action === 'stopAgent') {
+      isAgentRunning = false;
+      resetSolvedQuestionTracking();
       clearPendingAgentTimer();
-      chrome.storage.local.set({
-        agentState: {
-          status: 'running',
-          pendingAutoNext: false,
-          lastAutoNavUrl: null,
-          lastAutoNavKey: null,
-          samePageNavCount: 0
-        }
-      });
-      logAgentActivity("🚀 AI Agent Auto-Solver dinyalakan oleh pengguna.");
-      startAgentLoop();
+      if (isManagedByTopFrame()) return false;
+      setAgentState({ agentState: { status: 'idle' } });
+      logAgentActivity("🛑 AI Agent Auto-Solver dimatikan oleh pengguna.");
+      showToast("", "Berhenti", "info");
+      sendResponse({ success: true, status: "idle" });
     }
-    sendResponse({ success: true, status: "running" });
-  }
-  else if (request.action === 'stopAgent') {
-    isAgentRunning = false;
-    lastSolvedQuestionKey = null;
-    clearPendingAgentTimer();
-    if (isManagedByTopFrame()) return false;
-    chrome.storage.local.set({ agentState: { status: 'idle' } });
-    logAgentActivity("🛑 AI Agent Auto-Solver dimatikan oleh pengguna.");
-    showToast("", "Berhenti", "info");
-    sendResponse({ success: true, status: "idle" });
-  }
-  else if (request.action === 'searchAnswer') {
-    if (isManagedByTopFrame()) return false;
-    fetchAnswer(request.query);
-    sendResponse({ success: true });
-  }
+    else if (request.action === 'searchAnswer') {
+      if (isManagedByTopFrame()) return false;
+      fetchAnswer(request.query);
+      sendResponse({ success: true });
+    }
+  });
   return true;
 });
 
 // ---- STORAGE SYNC LISTENER (AUTO-TRIGGER ACROSS ALL FRAMES/IFRAMES) ----
-chrome.storage.onChanged.addListener((changes, area) => {
+chrome.storage.onChanged.addListener(async (changes, area) => {
+  await agentTabReady;
   if (area === 'local' && changes.agentState) {
     const newState = changes.agentState.newValue || {};
+    if (!ownsAgentState(newState)) {
+      if (isAgentRunning) {
+        isAgentRunning = false;
+        resetSolvedQuestionTracking();
+        clearPendingAgentTimer();
+      }
+      return;
+    }
     if (newState.status === 'running') {
       if (isManagedByTopFrame()) return;
       if (!isAgentRunning) {
         isAgentRunning = true;
-        lastSolvedQuestionKey = null;
+        resetSolvedQuestionTracking();
         clearPendingAgentTimer();
         const doc = getQuizDocument();
         if (doc && doc.querySelector('.formulation')) {
@@ -3335,9 +3953,9 @@ chrome.storage.onChanged.addListener((changes, area) => {
           startAgentLoop();
         }
       }
-    } else if (newState.status === 'idle' || newState.status === 'completed') {
+    } else if (['idle', 'completed', 'paused-by-captcha'].includes(newState.status)) {
       isAgentRunning = false;
-      lastSolvedQuestionKey = null;
+      resetSolvedQuestionTracking();
       clearPendingAgentTimer();
     }
   }

@@ -133,33 +133,40 @@ function buildProxyFetchInit(request) {
 
 // Listener untuk aksi-aksi khusus dari Content Script (seperti Tangkapan Layar & Proxy Fetch)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === "getTabIdentity") {
+    sendResponse({ tabId: sender.tab?.id ?? null });
+    return false;
+  }
   if (request.action === "captureVisibleTab") {
-    const targetWindowId = (sender && sender.tab && typeof sender.tab.windowId === 'number')
-      ? sender.tab.windowId
-      : null;
-    chrome.tabs.captureVisibleTab(targetWindowId, { format: "png" }, (dataUrl) => {
-      if (chrome.runtime.lastError) {
-        sendResponse({
-          success: false,
-          windowId: targetWindowId,
-          error: chrome.runtime.lastError.message
-        });
-      } else if (!dataUrl) {
-        sendResponse({
-          success: false,
-          windowId: targetWindowId,
-          error: "captureVisibleTab mengembalikan dataUrl kosong"
-        });
-      } else {
-        sendResponse({
-          success: true,
-          windowId: targetWindowId,
-          tabId: sender?.tab?.id ?? null,
-          dataUrl: dataUrl
-        });
+    const tabId = sender.tab?.id;
+    const windowId = sender.tab?.windowId;
+    if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
+      sendResponse({ success: false, error: "Screenshot harus diminta oleh tab." });
+      return false;
+    }
+    let switched = false;
+    const onActivated = (info) => {
+      if (info.windowId === windowId) switched = true;
+    };
+    chrome.tabs.onActivated.addListener(onActivated);
+    (async () => {
+      try {
+        const [before] = await chrome.tabs.query({ active: true, windowId });
+        if (switched || before?.id !== tabId) throw new Error("Tab kuis harus aktif saat screenshot.");
+        const dataUrl = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+        const [after] = await chrome.tabs.query({ active: true, windowId });
+        if (switched || after?.id !== tabId || before.url !== after.url) {
+          throw new Error("Tab berubah saat screenshot. Gambar dibuang.");
+        }
+        if (!dataUrl) throw new Error("Screenshot kosong.");
+        sendResponse({ success: true, windowId, tabId, dataUrl });
+      } catch (err) {
+        sendResponse({ success: false, windowId, tabId, error: err.message });
+      } finally {
+        chrome.tabs.onActivated.removeListener(onActivated);
       }
-    });
-    return true; // Menandakan bahwa sendResponse akan dipanggil secara asinkron
+    })();
+    return true;
   }
 
   // Proxy Fetch untuk membypass batasan CSP / CORS / Mixed Content halaman website (termasuk multipart & binary)

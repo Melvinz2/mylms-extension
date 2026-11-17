@@ -73,6 +73,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const CLOUD_ENDPOINT = 'https://mylms.melvino.online';
 
   // DOM Elements - OCR
+  const imageProcessingModeInput = document.getElementById('imageProcessingMode');
   const ocrEnabledInput = document.getElementById('ocrEnabled');
   const paddleOcrTokenInput = document.getElementById('paddleOcrToken');
   const btnToggleOcrToken = document.getElementById('btnToggleOcrToken');
@@ -252,6 +253,7 @@ document.addEventListener('DOMContentLoaded', () => {
     'aiModel',
     'aiCustomBaseUrl',
     'aiCustomModel',
+    'imageProcessingMode',
     'ocrEnabled',
     'paddleOcrToken',
     'paddleOcrModel',
@@ -276,6 +278,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     aiApiKeyInput.value = res.aiApiKey || '';
 
+    if (imageProcessingModeInput) imageProcessingModeInput.value = res.imageProcessingMode === 'ocr_first' ? 'ocr_first' : 'vision_first';
     if (ocrEnabledInput) ocrEnabledInput.checked = res.ocrEnabled !== false;
     if (paddleOcrTokenInput) paddleOcrTokenInput.value = res.paddleOcrToken || '';
     if (paddleOcrModelInput) paddleOcrModelInput.value = res.paddleOcrModel || 'PaddleOCR-VL-1.6';
@@ -303,6 +306,7 @@ document.addEventListener('DOMContentLoaded', () => {
       aiModel: (aiProviderSelect.value === 'custom') ? (aiCustomModelInput.value.trim() || 'deepseek-chat') : aiModelSelect.value,
       aiCustomBaseUrl: aiCustomBaseUrlInput.value.trim() || 'https://api.deepseek.com/v1',
       aiCustomModel: aiCustomModelInput.value.trim() || 'deepseek-chat',
+      imageProcessingMode: imageProcessingModeInput?.value === 'ocr_first' ? 'ocr_first' : 'vision_first',
       ocrEnabled: ocrEnabledInput ? Boolean(ocrEnabledInput.checked) : true,
       paddleOcrToken: paddleOcrTokenInput ? paddleOcrTokenInput.value.trim() : '',
       paddleOcrModel: paddleOcrModelInput ? (paddleOcrModelInput.value.trim() || 'PaddleOCR-VL-1.6') : 'PaddleOCR-VL-1.6',
@@ -339,6 +343,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (backendApiKeyInput) backendApiKeyInput.value = '';
       cloudModelSelect.value = '';
       chrome.storage.local.remove('selectedModelId');
+      if (imageProcessingModeInput) imageProcessingModeInput.value = 'vision_first';
       if (ocrEnabledInput) ocrEnabledInput.checked = true;
       if (paddleOcrTokenInput) paddleOcrTokenInput.value = '';
       if (paddleOcrModelInput) paddleOcrModelInput.value = 'PaddleOCR-VL-1.6';

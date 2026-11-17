@@ -97,9 +97,11 @@ document.addEventListener('DOMContentLoaded', () => {
   // RENDER ENGINE INFO
   function updateEngineBadge() {
     if (!engineInfo || typeof chrome === 'undefined' || !chrome.storage) return;
-    chrome.storage.local.get(['solverEngine', 'aiProvider', 'aiModel', 'aiCustomModel', 'ocrEnabled'], (res) => {
+    chrome.storage.local.get(['solverEngine', 'aiProvider', 'aiModel', 'aiCustomModel', 'imageProcessingMode', 'ocrEnabled'], (res) => {
       const engine = res.solverEngine || 'direct_ai';
-      const ocrSuffix = res.ocrEnabled ? ' + OCR' : '';
+      const supportsVision = (res.aiProvider || 'gemini') !== 'groq';
+      const speedVision = (engine !== 'direct_ai' || supportsVision) && res.imageProcessingMode !== 'ocr_first';
+      const ocrSuffix = speedVision ? ' · Cepat' : (res.ocrEnabled ? ' + OCR' : '');
 
       if (engine === 'direct_ai') {
         const rawProvider = res.aiProvider || 'gemini';
@@ -140,7 +142,7 @@ document.addEventListener('DOMContentLoaded', () => {
         btnStartAgent.style.display = 'inline-flex';
         btnStopAgent.style.display = 'none';
       } else {
-        statusLabel.textContent = 'Siap';
+        statusLabel.textContent = state.message || 'Siap';
         btnStartAgent.style.display = 'inline-flex';
         btnStopAgent.style.display = 'none';
       }
@@ -155,9 +157,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!tabs || tabs.length === 0) return;
         const activeTab = tabs[0];
 
-        chrome.storage.local.set({ agentState: { status: 'running', message: 'Memulai agen...' } }, syncState);
-        chrome.tabs.sendMessage(activeTab.id, { action: 'startAgent' }, () => {
-          if (chrome.runtime.lastError) {}
+        statusLabel.textContent = 'Memulai agen...';
+        chrome.tabs.sendMessage(activeTab.id, { action: 'startAgent' }, response => {
+          if (chrome.runtime.lastError || !response?.success) {
+            statusLabel.textContent = 'Kuis tidak ditemukan. Buka atau refresh halaman kuis.';
+            return;
+          }
+          syncState();
         });
       });
     });
@@ -242,7 +248,7 @@ document.addEventListener('DOMContentLoaded', () => {
       if (areaName !== 'local') return;
       if (changes.agentState) syncState();
       if (changes.navigationMode) setNavMode(changes.navigationMode.newValue, false);
-      if (changes.solverEngine || changes.aiProvider || changes.ocrEnabled) updateEngineBadge();
+      if (changes.solverEngine || changes.aiProvider || changes.ocrEnabled || changes.imageProcessingMode) updateEngineBadge();
     });
   }
 

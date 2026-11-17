@@ -602,10 +602,18 @@
       <section id="panelSectionOcr" class="tab-panel card" role="tabpanel" aria-labelledby="tabBtnOcr" style="display: none;">
         <div class="panel-header">
           <h2 class="panel-title">OCR Gambar &amp; Rumus</h2>
-          <p class="panel-desc">Ekstraksi teks dan rumus otomatis via PaddleOCR-VL-1.6 saat soal memuat gambar.</p>
+          <p class="panel-desc">Pilih cara membaca soal bergambar dan atur PaddleOCR bila diperlukan.</p>
         </div>
 
         <div id="panelPaddleOcr">
+          <div class="form-group field">
+            <label for="imageProcessingMode" class="form-label">Mode Soal Bergambar</label>
+            <select id="imageProcessingMode">
+              <option value="vision_first">Cepat — Langsung ke AI Vision</option>
+              <option value="ocr_first">OCR dahulu — Ekstrak teks dan rumus</option>
+            </select>
+            <p class="form-hint">Berlaku untuk Direct AI dan Kamus Mini Cloud. Mode Cepat mengirim screenshot langsung ke AI Vision tanpa OCR. Pada Cloud, pilih model yang mendukung gambar; jika gagal, agen berhenti tanpa mencoba OCR otomatis. Untuk model teks Direct AI, gunakan PaddleOCR.</p>
+          </div>
           <!-- Toggle Row -->
           <div class="switch-row">
             <div class="switch-label-wrap">

@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'extensi/**'
+      - 'tests/**'
       - '.github/workflows/package-extension.yml'
   workflow_dispatch:
 
@@ -17,6 +18,13 @@ jobs:
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Test extension regressions
+        run: node --test tests/extension-regressions.test.cjs
 
       - name: Read manifest version
         id: meta
@@ -43,6 +51,7 @@ jobs:
           SHA=$(sha256sum "kamus-mini-${{ steps.meta.outputs.version }}.zip" | cut -d' ' -f1)
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
           echo "SHA256=$SHA" >> "$GITHUB_ENV"
+          printf "%s  %s\n" "$SHA" "kamus-mini-${{ steps.meta.outputs.version }}.zip" > "kamus-mini-${{ steps.meta.outputs.version }}.zip.sha256"
 
       - name: Publish release
         env:
@@ -52,11 +61,11 @@ jobs:
           ZIP="kamus-mini-$VERSION.zip"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists — uploading asset."
-            gh release upload "$TAG" "$ZIP" --clobber
+            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
           else
             echo "Creating release $TAG"
             gh release create "$TAG" \
               --title "Kamus Mini $VERSION" \
-              --notes "Ekstensi $VERSION · sha256 ${SHA256}" \
-              "$ZIP"
+              --notes "Mode Cepat untuk Cloud dan Direct AI: screenshot langsung ke model Vision tanpa OCR; toggle OCR dahulu tetap tersedia. Termasuk perbaikan kontrol agen, pemilihan jawaban, dan log waktu total/server. SHA256: ${SHA256}" \
+              "$ZIP" "$ZIP.sha256"
           fi

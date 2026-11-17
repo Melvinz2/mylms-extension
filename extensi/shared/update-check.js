@@ -17,7 +17,6 @@
     } catch { /* environment without chrome (tests/harness) */ }
     return '0.0.0'
   })()
-  const STORE_KEY = 'kamusMini_updateNotified'
 
   const cmp = (a, b) => {
     const pa = String(a).split('.').map(Number)
@@ -31,15 +30,15 @@
 
   function settings() {
     return new Promise((resolve) => {
-      chrome.storage.local.get(['backendUrl', 'apiKey'], (v) => resolve({
-        serverUrl: v.backendUrl || '',
+      chrome.storage.local.get(['baseUrl', 'backendUrl', 'apiKey'], (v) => resolve({
+        serverUrl: v.baseUrl || v.backendUrl || 'https://mylms.melvino.online',
         apiKey: v.apiKey || '',
       }))
     })
   }
 
   async function check(serverUrl, apiKey) {
-    if (!serverUrl) return null
+    if (!serverUrl || !apiKey) return null
     const res = await fetch(`${serverUrl.replace(/\/+$/, '')}/api/v1/extension/latest`, {
       headers: { 'x-api-key': apiKey, 'X-AI-Client-Version': VERSION },
     })
@@ -47,7 +46,7 @@
     const meta = await res.json()
     if (!meta || !meta.version) return null
     if (cmp(meta.version, VERSION) <= 0) return null
-    return { ...meta, installed: VERSION }
+    return { ...meta, serverUrl, installed: VERSION }
   }
 
   function renderPopupBanner(update) {
@@ -93,20 +92,18 @@
       return
     }
     if (chrome.action?.setBadgeText) chrome.action.setBadgeText({ text: '!' })
-    const notified = localStorage.getItem(STORE_KEY)
-    if (notified !== update.version) {
-      localStorage.setItem(STORE_KEY, update.version)
-      notifyInPage(update)
-    }
+    if (typeof document !== 'undefined') notifyInPage(update)
   }
 
   // Popup: every open.
-  if (typeof document !== 'undefined' && document.getElementById('statusBadge')) {
-    document.addEventListener('DOMContentLoaded', () => { run().catch(() => {}) })
+  if (typeof document !== 'undefined') {
+    const start = () => { if (document.getElementById('statusBadge')) run().catch(() => {}) }
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true })
+    else start()
   }
 
   // Background service worker: every launch + daily alarm.
-  if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onInstalled) {
+  if (typeof document === 'undefined' && typeof chrome !== 'undefined' && chrome.runtime?.onInstalled) {
     chrome.runtime.onInstalled.addListener(() => { run().catch(() => {}) })
     if (chrome.alarms) {
       chrome.alarms.create('kamusMiniUpdateCheck', { periodInMinutes: 24 * 60 })
