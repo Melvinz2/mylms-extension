@@ -287,3 +287,54 @@ test('background log writer serializes frames and bounds previews and stage data
  assert.equal(state.questionPreviews.length,5);
  await store.write({identity:{id:'oversize'},preview:'data:image/jpeg;base64,'+'A'.repeat(200*1024)}); assert.equal(state.questionPreviews.length,5); assert.ok(!state.questionPreviews.some(p=>p.id==='oversize'));
 });
+
+function usagePopup({ key, data, error }) {
+  const elements = new Map(['btnUsage', 'usagePanel', 'usageReadout', 'btnUsageRetry'].map(id => [id, {
+    hidden: true,
+    textContent: '',
+    addEventListener(_event, callback) { this.click = callback; },
+    setAttribute(_attribute, value) { this.expanded = value; },
+  }]));
+  const timers = new Map();
+  let calls = 0;
+  let nextTimer = 0;
+  vm.runInContext(source('popup-usage.js'), context({
+    document: { getElementById: id => elements.get(id) },
+    chrome: { storage: { local: { get: async () => ({ apiKey: key }) } } },
+    KamusMiniCloud: { getMyAiUsage: async () => { calls++; if (error) throw error; return data; } },
+    setTimeout(callback) { timers.set(++nextTimer, callback); return nextTimer; },
+    clearTimeout(id) { timers.delete(id); },
+  }));
+  return { elements, timers, get calls() { return calls; } };
+}
+
+test('usage tracker fetches only while open and preserves zero and unlimited quotas', async () => {
+  const popup = usagePopup({ key: 'cloud-key', data: { remainingThisMinute: 0, requestsPerMinute: 20,
+    activeRequests: 0, concurrentLimit: 2, quota: { remainingRequests: null, remainingTokens: 0, nextResetAt: '2026-11-17T17:00:00Z' } } });
+  const open = popup.elements.get('btnUsage');
+  assert.equal(popup.calls, 0);
+  open.click();
+  await new Promise(setImmediate);
+  assert.equal(popup.calls, 1);
+  assert.match(popup.elements.get('usageReadout').textContent, /0 dari 20.*\n.*0 dari maksimal 2.*\n.*Tanpa batas permintaan.*0 token.*\n.*WIB/);
+  assert.equal(popup.timers.size, 1);
+  open.click();
+  assert.equal(popup.timers.size, 0);
+  assert.equal(open.expanded, 'false');
+});
+
+test('usage tracker reports missing keys and offers retry after network failure', async () => {
+  const disconnected = usagePopup({});
+  disconnected.elements.get('btnUsage').click();
+  await new Promise(setImmediate);
+  assert.match(disconnected.elements.get('usageReadout').textContent, /Belum terhubung/);
+  assert.equal(disconnected.calls, 0);
+  const offline = usagePopup({ key: 'cloud-key', error: new Error('offline') });
+  offline.elements.get('btnUsage').click();
+  await new Promise(setImmediate);
+  const retry = offline.elements.get('btnUsageRetry');
+  assert.equal(retry.hidden, false);
+  retry.click();
+  await new Promise(setImmediate);
+  assert.equal(offline.calls, 2);
+});

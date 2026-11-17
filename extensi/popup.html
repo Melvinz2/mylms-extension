@@ -17,6 +17,16 @@
       user-select: none;
     }
 
+    #usagePanel {
+      margin-bottom: var(--s-3);
+      padding: var(--s-3);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+    }
+
+    #usagePanel h2 { margin: 0; font-size: 13px; }
+    #usageReadout { margin: 6px 0 0; font-size: 12px; white-space: pre-line; }
+
     /* Header */
     .popup-header {
       display: flex;
@@ -186,6 +196,9 @@
           <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
         </svg>
       </button>
+      <button type="button" id="btnUsage" class="icon-btn" aria-label="Penggunaan AI" aria-controls="usagePanel" aria-expanded="false" title="Penggunaan AI">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h16M7 16v-4m5 4V8m5 8V4"/></svg>
+      </button>
       <button type="button" id="btnOpenOptions" class="icon-btn" aria-label="Pengaturan" title="Pengaturan">
         <svg viewBox="0 0 24 24">
           <circle cx="12" cy="12" r="3"></circle>
@@ -194,6 +207,12 @@
       </button>
     </div>
   </header>
+
+  <section id="usagePanel" aria-labelledby="usageTitle" hidden>
+    <h2 id="usageTitle">Kuota Kamus Mini Cloud</h2>
+    <p id="usageReadout" role="status"></p>
+    <button type="button" id="btnUsageRetry" class="btn btn--secondary btn--sm" hidden>Coba lagi</button>
+  </section>
 
   <!-- Status Chip -->
   <div class="status-card">
@@ -238,5 +257,6 @@
 
   <script src="ai-cloud-client.js"></script>
   <script src="popup.js"></script>
+  <script src="popup-usage.js"></script>
 </body>
 </html>
