@@ -260,3 +260,30 @@ test('Cloud client serializes the mode and question context into multipart field
   assert.equal(fd.get('imageProcessingMode'),'vision_first'); assert.equal(fd.get('questionType'),'essay');
   assert.deepEqual(JSON.parse(fd.get('options')),['A. One']); assert.equal(fd.get('isMultiChoice'),'false');
 });
+
+
+test('question summaries have stable attempts, bounded retention and complete checkbox context', async () => {
+  const state = {}; const session = new Map();
+  const c = context({ self: {}, crypto: require('node:crypto').webcrypto, sessionStorage: { getItem: k => session.get(k), setItem: (k,v) => session.set(k,v) }, chrome: { runtime: {}, storage: { local: { get: (_keys,cb) => cb(structuredClone(state)), set: (patch,cb) => { Object.assign(state,patch); cb(); } } } } });
+  vm.runInContext(source('question-logs.js'),c);
+  const logs = c.self.KamusQuestionLogs;
+  let firstSession;
+  for (let i=0;i<55;i++) { logs.begin(i,`scope-${i}`); const ctx=logs.context('choice',true,2); firstSession ||= ctx.sessionId; assert.equal(ctx.sessionId,firstSession); assert.equal(ctx.isMultiChoice,true); logs.event('AI','INFO','Resolved'); logs.answer({answer:'One and Three',choice:'A, C'}); logs.finish({success:true,mode:'Cloud AI Vision'},1500); }
+  await new Promise(resolve => setTimeout(resolve,25));
+  assert.equal(state.questionSummaries.length,50); assert.equal(state.questionSummaries[0].qNum,5);
+  assert.equal(new Set(state.questionSummaries.map(r=>r.attemptId)).size,50);
+  assert.ok(state.questionSummaries.every(r=>r.answer==='One and Three' && r.choice==='A, C' && r.status==='success' && r.totalDurationMs===1500));
+  session.set('kamusCloudLastActivity',String(Date.now()-31*60000)); logs.begin(56,'scope-56'); assert.notEqual(logs.context('essay',false,0).sessionId,firstSession);
+});
+
+
+test('background log writer serializes frames and bounds previews and stage data', async () => {
+ const state={}; const c=context({chrome:{runtime:{},storage:{local:{get:(_k,cb)=>setTimeout(()=>cb(structuredClone(state)),1),set:(patch,cb)=>setTimeout(()=>{Object.assign(state,patch);cb()},1)}}}});
+ vm.runInContext(source('shared/question-log-store.js'),c);
+ const store=c.KamusQuestionLogStore;
+ await Promise.all(Array.from({length:60},(_,i)=>store.write({identity:{id:'frame-'+i,qNum:i},patch:{answer:'x'.repeat(20000)},event:{message:'Done',data:{large:'x'.repeat(10000)}}})));
+ assert.equal(state.questionSummaries.length,50); assert.equal(state.questionSummaries[0].id,'frame-10'); assert.equal(state.questionSummaries[0].answer.length,12000); assert.equal(state.questionSummaries[0].stages[0].data.truncated,true);
+ await Promise.all(Array.from({length:7},(_,i)=>store.write({identity:{id:'preview-'+i},preview:'data:image/jpeg;base64,AAAA'})));
+ assert.equal(state.questionPreviews.length,5);
+ await store.write({identity:{id:'oversize'},preview:'data:image/jpeg;base64,'+'A'.repeat(200*1024)}); assert.equal(state.questionPreviews.length,5); assert.ok(!state.questionPreviews.some(p=>p.id==='oversize'));
+});

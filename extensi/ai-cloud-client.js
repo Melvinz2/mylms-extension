@@ -80,20 +80,21 @@
 
   // Lookup teks (agent attempt/fallback & quick search).
   // modelId boleh null -> server pakai preferensi akun.
-  async function searchAnswer(apiKey, { questionText, options = null, query, modelId }, fetchImpl) {
+  async function searchAnswer(apiKey, { questionText, options = null, query, modelId, context, sourceOptions }, fetchImpl) {
     const payload = query !== undefined
       ? { query, ...(modelId ? { modelId } : {}) }
-      : { questionText, options, ...(modelId ? { modelId } : {}) };
+      : { questionText, options, context: context ? { ...context, attemptId: context.attemptId + (options ? ':text-options' : ':text-fast') } : undefined, sourceOptions, ...(modelId ? { modelId } : {}) };
     const path = query !== undefined ? '/api/search' : '/api/v1/agent/search-answer';
     return request(path, { method: 'POST', apiKey, fetchImpl, json: payload });
   }
 
   // Lookup gambar (multipart). `modelId` opsional sebagai form field.
-  async function searchAnswerImage(apiKey, { imageBlob, filename, modelId, imageProcessingMode = 'ocr_first', questionText = '', options = [], questionType = 'choice', isMultiChoice = false, expectedCount = 0 }, fetchImpl) {
+  async function searchAnswerImage(apiKey, { imageBlob, filename, modelId, imageProcessingMode = 'ocr_first', questionText = '', options = [], questionType = 'choice', isMultiChoice = false, expectedCount = 0, context }, fetchImpl) {
     const fd = new FormData();
     fd.append('image', imageBlob, filename || 'question.png');
     fd.append('imageProcessingMode', imageProcessingMode);
     fd.append('questionText', questionText);
+    if (context) fd.append('context', JSON.stringify({ ...context, attemptId: context.attemptId + ':image' }));
     fd.append('options', JSON.stringify(options));
     fd.append('questionType', questionType);
     fd.append('isMultiChoice', String(Boolean(isMultiChoice)));

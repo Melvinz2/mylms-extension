@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Kamus Mini",
-  "version": "1.4",
+  "version": "1.5",
   "description": "Cari kunci jawaban dari bank soal secara instan dengan blok teks dan klik kanan, atau selesaikan kuis otomatis dengan Direct AI.",
   "permissions": [
     "alarms",
@@ -47,6 +47,7 @@
       "js": [
         "ocr.js",
         "ai-cloud-client.js",
+        "question-logs.js",
         "content.js"
       ],
       "run_at": "document_start",

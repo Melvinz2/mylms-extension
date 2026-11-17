@@ -582,6 +582,7 @@ function enqueueStorageLogUpdate(updaterFn) {
 }
 
 function logDebugEvent(category, level, message, data = null) {
+  globalThis.KamusQuestionLogs?.event(category, level, message, data);
   const ts = new Date().toLocaleTimeString('id-ID', { hour12: false });
   const iso = new Date().toISOString();
   const frameRole = (window === window.top) ? 'TOP' : 'IFRAME';
@@ -605,6 +606,7 @@ function logDebugEvent(category, level, message, data = null) {
 }
 
 function logAgentActivity(message, level = null) {
+  globalThis.KamusQuestionLogs?.event('ACTIVITY', level || 'INFO', message);
   const inferredLevel = level || (
     message.includes('❌') ? 'ERROR'
       : message.includes('⚠️') ? 'WARN'
@@ -635,6 +637,7 @@ function logAgentActivity(message, level = null) {
 }
 
 function saveCapturedDebugPreview(meta) {
+  globalThis.KamusQuestionLogs?.preview(meta?.dataUrlPreview);
   if (!isExtensionValid()) return;
   try {
     chrome.storage.local.set({ lastCapturedDebug: meta });
@@ -642,6 +645,7 @@ function saveCapturedDebugPreview(meta) {
 }
 
 function mergeCapturedDebugPreview(patch) {
+  if (patch?.aiAnswer || patch?.aiChoice) globalThis.KamusQuestionLogs?.answer(patch);
   if (!isExtensionValid() || !patch) return;
   try {
     chrome.storage.local.get(['lastCapturedDebug'], (res) => {
@@ -3295,7 +3299,8 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
     return { success: false, mode: 'Config Error' };
   }
   
-  const fallbackCtx = { questionText, options, config, shouldContinue };
+  const sourceCtx = globalThis.KamusQuestionLogs?.context(questionType, Boolean(d.querySelector('.answer input[type="checkbox"]')), extractExpectedMultiChoiceCount(questionText));
+  const fallbackCtx = { questionText, options, config, shouldContinue, sourceCtx };
 
   // 0. Cek Awal: Deteksi Gambar -> Langsung Fallback 2 (Math Mode / Direct AI Vision fallback)
   if (checkForImageTags(d)) {
@@ -3309,9 +3314,11 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
   const hasDirectAiFallback = Boolean((config.aiApiKey || '').trim()) || (config.aiProvider === 'custom');
 
   const tryApplyCloudResponse = async (res, data, modeLabel, attemptLabel) => {
+    if (!shouldContinue()) return null;
     if ((res && !res.ok) || !data || data.aiQuotaExceeded || (!data.answer && !data.choice) || Number(data.matchScore || 0) < threshold) {
       return null;
     }
+    globalThis.KamusQuestionLogs?.answer(data);
     const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d, shouldContinue);
     if (!match.success) return null;
 
@@ -3343,6 +3350,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
     logAgentActivity(`[Soal ${qNum}] Attempt 1: Fast Text Search (${baseUrl})...`);
     const { res, body: data, limit } = await KamusMiniCloud.searchAnswer(apiKey, {
       questionText: questionText,
+      context: sourceCtx, sourceOptions: options,
       options: null, // Attempt 1: teks soal saja
       modelId: config.selectedModelId || null
     });
@@ -3364,7 +3372,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
     logAgentActivity(`[Soal ${qNum}] Attempt 1 Gagal/Skor Rendah. Mencoba Fallback 1 (Soal + Opsi)...`);
     const { res, body: data, limit } = await KamusMiniCloud.searchAnswer(apiKey, {
       questionText: questionText,
-      options: options,
+      options: options, context: sourceCtx, sourceOptions: options,
       modelId: config.selectedModelId || null
     });
     if (limit || data?.aiQuotaExceeded) {
@@ -3418,7 +3426,7 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc, fallbackC
     const selectedId = (fallbackCtx && fallbackCtx.config && fallbackCtx.config.selectedModelId) || modelCfg.selectedModelId || null;
     const { res, body: data, limit } = await KamusMiniCloud.searchAnswerImage(apiKey, {
       imageBlob, filename: `question_${qNum}.png`, modelId: selectedId,
-      imageProcessingMode, questionText, options, questionType, isMultiChoice, expectedCount
+      imageProcessingMode, questionText, options, questionType, isMultiChoice, expectedCount, context: fallbackCtx?.sourceCtx
     });
     if (limit || data?.aiQuotaExceeded) {
       const waitSec = limit?.retryAfterSeconds || '?';
@@ -3426,6 +3434,9 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc, fallbackC
       logAgentActivity(`[Soal ${qNum}] AI Cloud dilimit (${reason}). Tunggu ${waitSec}s.`);
     }
 
+    if (!shouldContinue()) return { success:false, mode:'Stopped' };
+    if (data) globalThis.KamusQuestionLogs?.answer(data);
+    if (imageBlob) globalThis.KamusQuestionLogs?.blob(imageBlob);
     if (data?.timings) logDebugEvent('CLOUD', 'INFO', `Waktu server soal #${qNum} (${data.imageProcessingMode || imageProcessingMode})`, { qNum, ...data.timings });
     if (cloudVision && (!res?.ok || limit || data?.aiQuotaExceeded || data?.imageProcessingMode !== 'vision_first')) {
       throw new Error(data?.message || data?.error || limit?.message || 'Server belum menjalankan Mode Cepat Cloud. Perbarui backend atau pilih OCR dahulu.');
@@ -3717,10 +3728,14 @@ async function startAgentLoop() {
       showToast("", `Soal #${qNum}${progressSuffix}...`, 'info');
 
       const questionStartedAt = Date.now();
-      const result = await solveQuestionFlow(qNum, doc, queScope, shouldContinue);
+      const questionLogIdentity = globalThis.KamusQuestionLogs?.begin(qNum, itemKey);
+      let result;
+      try { result = await solveQuestionFlow(qNum, doc, queScope, shouldContinue); }
+      catch (error) { result = { success:false, mode:'Error', error:error.message }; }
       logDebugEvent('SOLVER', result?.success ? 'SUCCESS' : 'WARN', `Total pengerjaan soal #${qNum}: ${((Date.now() - questionStartedAt) / 1000).toFixed(1)} detik`, {
         qNum, totalDurationMs: Date.now() - questionStartedAt, mode: result?.mode, success: Boolean(result?.success)
       });
+      globalThis.KamusQuestionLogs?.finish(result, Date.now() - questionStartedAt, questionLogIdentity);
       if (!shouldContinue()) return;
       if (!result?.success) {
         logAgentActivity(`[Soal ${qNum}] Gagal dijawab: ${result?.error || result?.mode || 'Tidak ada jawaban valid'}. Agen berhenti; tekan Start untuk mencoba lagi.`);

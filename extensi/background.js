@@ -1,4 +1,5 @@
 importScripts('shared/update-check.js')
+importScripts('shared/question-log-store.js')
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
@@ -133,6 +134,11 @@ function buildProxyFetchInit(request) {
 
 // Listener untuk aksi-aksi khusus dari Content Script (seperti Tangkapan Layar & Proxy Fetch)
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+  if (request.action === 'questionLogWrite') {
+    if (sender.id !== chrome.runtime.id) { sendResponse({success:false}); return; }
+    KamusQuestionLogStore.write(request).then(() => sendResponse({success:true}));
+    return true;
+  }
   if (request.action === "getTabIdentity") {
     sendResponse({ tabId: sender.tab?.id ?? null });
     return false;

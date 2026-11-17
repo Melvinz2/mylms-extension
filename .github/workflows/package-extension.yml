@@ -66,6 +66,6 @@ jobs:
             echo "Creating release $TAG"
             gh release create "$TAG" \
               --title "Kamus Mini $VERSION" \
-              --notes "Mode Cepat untuk Cloud dan Direct AI: screenshot langsung ke model Vision tanpa OCR; toggle OCR dahulu tetap tersedia. Termasuk perbaikan kontrol agen, pemilihan jawaban, dan log waktu total/server. SHA256: ${SHA256}" \
+              --notes "Riwayat per soal dengan jawaban, mode, durasi, preview terbatas dan detail teknis tertutup. Cloud mengirim konteks checkbox/isian serta identitas sesi untuk draft bank soal; sumber gambar disimpan privat dan diperiksa ulang di latar belakang, tanpa OCR tambahan pada Mode Cepat. Publikasi tetap memerlukan persetujuan admin. Direct AI tidak dikumpulkan. Log lama tetap tersedia. SHA256: ${SHA256}" \
               "$ZIP" "$ZIP.sha256"
           fi
