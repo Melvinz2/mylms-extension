@@ -8,6 +8,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const statusLabel = document.getElementById('statusLabel');
   const engineInfo = document.getElementById('engineInfo');
 
+  const btnModeSuggestion = document.getElementById('btnModeSuggestion');
   const btnModeSemi = document.getElementById('btnModeSemi');
   const btnModeAuto = document.getElementById('btnModeAuto');
   const chkAutoNext = document.getElementById('chkAutoNext');
@@ -19,6 +20,38 @@ document.addEventListener('DOMContentLoaded', () => {
   const manualQuery = document.getElementById('manualQuery');
   const btnManualSearch = document.getElementById('btnManualSearch');
   const manualResult = document.getElementById('manualResult');
+
+  const identityReminder = document.getElementById('cloudIdentityReminder');
+  const identityText = document.getElementById('cloudIdentityText');
+  let identityGeneration = 0;
+  async function refreshIdentityReminder() {
+    if (!identityReminder || !identityText) return;
+    const generation = ++identityGeneration;
+    identityReminder.hidden = true;
+    identityText.textContent = '';
+    const config = await new Promise(resolve => chrome.storage.local.get(['solverEngine', 'apiKey'], resolve));
+    if (config.solverEngine !== 'cloud' || !config.apiKey) return;
+    try {
+      const { body } = await KamusMiniCloud.request('/api/v1/me/academic-profile', {
+        apiKey: config.apiKey,
+        fetchImpl: (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(6000) }),
+      });
+      if (generation !== identityGeneration || !body?.data?.policyActive) return;
+      const { data } = body;
+      if (['VERIFIED', 'ADMIN'].includes(data.status)) return;
+      const deadline = new Date(data.graceEndsAt ?? '');
+      const formatted = Number.isNaN(deadline.getTime()) ? '' : new Intl.DateTimeFormat('id-ID', {
+        dateStyle: 'medium', timeStyle: 'short', timeZone: 'Asia/Jakarta',
+      }).format(deadline);
+      identityText.textContent = data.status === 'PENDING' ? 'Identitas sedang menunggu pengesahan admin.'
+        : data.status === 'REJECTED' ? 'Perbaiki pengajuan identitas melalui MyLMS.'
+        : 'Lengkapi identitas siswa melalui MyLMS.';
+      if (formatted) identityText.textContent += ` Masa tenggang sampai ${formatted} WIB.`;
+      if (data.access?.allowed === false) identityText.textContent += ' Akses Cloud sedang dibatasi.';
+      identityReminder.hidden = false;
+    } catch { /* The explicit diagnostics button can check connection failures. */ }
+  }
+  void refreshIdentityReminder();
 
   // THEME MANAGEMENT
   function updateThemeIcon() {
@@ -52,23 +85,23 @@ document.addEventListener('DOMContentLoaded', () => {
   // NAVIGATION MODE SYNC
   function setNavMode(mode, save = true) {
     const isAuto = mode === 'full_auto';
-    if (btnModeSemi && btnModeAuto) {
-      btnModeSemi.classList.toggle('active', !isAuto);
-      btnModeSemi.setAttribute('aria-checked', !isAuto ? 'true' : 'false');
-      btnModeAuto.classList.toggle('active', isAuto);
-      btnModeAuto.setAttribute('aria-checked', isAuto ? 'true' : 'false');
+    const navigationMode = isAuto || mode === 'suggestion' ? mode : 'semi_auto';
+    for (const [button, value] of [[btnModeSuggestion, 'suggestion'], [btnModeSemi, 'semi_auto'], [btnModeAuto, 'full_auto']]) {
+      button?.classList.toggle('active', navigationMode === value);
+      button?.setAttribute('aria-checked', String(navigationMode === value));
     }
     if (chkAutoNext) {
       chkAutoNext.checked = isAuto;
     }
     if (autoNextLabel) {
-      autoNextLabel.textContent = isAuto ? 'Auto' : 'Semi';
+      autoNextLabel.textContent = isAuto ? 'Auto' : navigationMode === 'suggestion' ? 'Saran' : 'Semi';
     }
     if (save && typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ navigationMode: isAuto ? 'full_auto' : 'semi_auto' });
+      chrome.storage.local.set({ navigationMode });
     }
   }
 
+  btnModeSuggestion?.addEventListener('click', () => setNavMode('suggestion'));
   if (btnModeSemi) {
     btnModeSemi.addEventListener('click', () => setNavMode('semi_auto', true));
   }
@@ -232,7 +265,7 @@ document.addEventListener('DOMContentLoaded', () => {
           query, modelId: config.selectedModelId || null
         });
         if (limit) {
-          manualResult.textContent = `AI dilimit (${limit.reasonCode}). Coba lagi dalam ${limit.retryAfterSeconds} detik.`;
+          manualResult.textContent = limit.message;
           return;
         }
         manualResult.textContent = data.jawaban || data.answer || 'Tidak ditemukan di database.';
@@ -247,6 +280,7 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.onChanged.addListener((changes, areaName) => {
       if (areaName !== 'local') return;
       if (changes.agentState) syncState();
+      if (changes.solverEngine || changes.apiKey) void refreshIdentityReminder();
       if (changes.navigationMode) setNavMode(changes.navigationMode.newValue, false);
       if (changes.solverEngine || changes.aiProvider || changes.ocrEnabled || changes.imageProcessingMode) updateEngineBadge();
     });

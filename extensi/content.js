@@ -530,7 +530,7 @@ async function fetchAnswer(query) {
     const { body: data, limit } = await KamusMiniCloud.searchAnswer(cfg.apiKey, {
       query: query.trim(), modelId: cfg.selectedModelId || null
     });
-    if (limit) { showToast('', `AI dilimit: ${limit.message}`, 'error'); return; }
+    if (limit) { showToast('', limit.message, 'error'); return; }
     const answerText = data.jawaban || data.answer || '';
     if ((data.success !== false) && answerText) {
       showToast('', answerText, 'info');
@@ -539,6 +539,7 @@ async function fetchAnswer(query) {
     }
   } catch (err) {
     console.error("Gagal melakukan pencarian pasif:", err);
+    showToast('', err.message || 'Layanan AI sedang tidak tersedia.', 'error');
   }
 }
 
@@ -2752,6 +2753,8 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc, solve
   const resetCbBeforeApply = Boolean(solverOpts && solverOpts.resetCheckboxesFirst);
   const applyDirectResult = async (parsedObj, minThresh) => {
     if (!shouldContinue()) return { success: false, mode: 'Stopped' };
+    if (solverOpts.mayApply && !await solverOpts.mayApply(parsedObj)) return { success: false, mode: 'Suggestion closed' };
+    if (!shouldContinue()) return { success: false, mode: 'Stopped' };
     if (resetCbBeforeApply && parsedObj && (parsedObj.choice || parsedObj.answer)) {
       clearCheckboxSelections(d);
     }
@@ -3233,9 +3236,80 @@ async function solveWithDirectAI(qNum, questionText, options, config, doc, solve
 // ======================================================
 // TWO-LEVEL NESTED FALLBACK / DUAL-ENGINE CORE SOLVER
 // ======================================================
-async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue = () => isAgentRunning) {
+function reportCloudAiUnavailable(qNum, res, data, limit) {
+  if (limit?.isCancelled || data?.reasonCode === 'REQUEST_CANCELLED') {
+    const message = data?.message || limit?.message || 'Permintaan dibatalkan admin. Ulangi soal ini secara manual bila diperlukan.';
+    logAgentActivity(`[Soal ${qNum}] ${message}`);
+    showToast('', message, 'warning');
+    return { success: false, mode: 'Cancelled', reasonCode: 'REQUEST_CANCELLED', error: message };
+  }
+  if (limit?.isAccessRestricted || [401, 403].includes(res?.status)) {
+    const message = data?.message || limit?.message || 'Akses Cloud dibatasi. Buka identitas siswa di website atau hubungi admin sekolah.';
+    logAgentActivity(`[Soal ${qNum}] ${message}`);
+    showToast('', message, 'error');
+    isAgentRunning = false;
+    setAgentState({ agentState: { status: 'idle' } });
+    return { success: false, mode: 'Account Access Restricted', reasonCode: data?.reasonCode || limit?.reasonCode, error: message };
+  }
+  if (!limit?.isUnavailable && !data?.aiUnavailable && res?.status !== 503 &&
+      !['PROVIDER_UNAVAILABLE', 'MODEL_UNAVAILABLE', 'AI_DISABLED'].includes(data?.reasonCode || limit?.reasonCode)) return null;
+  const message = data?.message || limit?.message || data?.jawaban || data?.answer || data?.error ||
+    'Layanan AI sedang tidak tersedia. Silakan coba lagi nanti.';
+  logAgentActivity(`❌ [Soal ${qNum}] ${message}`);
+  showToast('', message, 'error');
+  return { success: false, mode: 'AI Unavailable', aiUnavailable: true, error: message };
+}
+
+function captureSuggestionIdentity(scope) {
+  return JSON.stringify([
+    scope.ownerDocument?.URL, getQuestionIdentityFromElement(scope).questionKey, detectQuizInputType(scope),
+    scrapeQuestionText(scope), scrapeOptionsText(scope),
+    [...scope.querySelectorAll('.formulation img')].map(image => image.currentSrc || image.src),
+  ]);
+}
+
+function requestSuggestionApproval(scope, identity, answer, shouldContinue) {
+  if (!scope.isConnected || !shouldContinue() || captureSuggestionIdentity(scope) !== identity) return Promise.resolve(false);
+  const doc = scope.ownerDocument;
+  return new Promise(resolve => {
+    const panel = doc.createElement('section');
+    panel.setAttribute('role', 'region');
+    panel.setAttribute('aria-label', 'Saran jawaban Kamus Mini');
+    panel.style.cssText = 'position:fixed;bottom:1rem;right:1rem;z-index:2147483647;width:min(23rem,calc(100vw - 2rem));max-height:50vh;overflow:auto;box-sizing:border-box;background:#fff;color:#17201c;border:1px solid #67746c;border-radius:12px;padding:1rem;box-shadow:0 6px 24px #0003;font:14px/1.5 system-ui;text-align:left;';
+    const heading = doc.createElement('strong');
+    heading.textContent = 'Saran jawaban Kamus Mini';
+    const content = doc.createElement('p');
+    content.style.cssText = 'white-space:pre-wrap;overflow-wrap:anywhere;margin:0.5rem 0;';
+    content.textContent = [answer.choice, answer.answer].filter(Boolean).join(' · ');
+    const apply = doc.createElement('button'), cancel = doc.createElement('button');
+    apply.type = cancel.type = 'button';
+    apply.textContent = 'Terapkan ke soal ini';
+    cancel.textContent = 'Tutup';
+    cancel.style.marginInlineStart = '0.5rem';
+    const isCurrent = () => shouldContinue() && scope.isConnected && captureSuggestionIdentity(scope) === identity;
+    const finish = permitted => { clearInterval(interval); clearTimeout(timeout); panel.remove(); resolve(permitted); };
+    const interval = setInterval(() => { if (!isCurrent()) finish(false); }, 500);
+    const timeout = setTimeout(() => finish(false), 120000);
+    apply.addEventListener('click', event => { if (event.isTrusted) finish(isCurrent()); });
+    cancel.addEventListener('click', () => finish(false));
+    panel.addEventListener('keydown', event => { if (event.key === 'Escape') finish(false); });
+    panel.append(heading, content, apply, cancel);
+    doc.body.appendChild(panel);
+  });
+}
+
+async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue = () => isAgentRunning, suggestion = false) {
   if (!shouldContinue()) return { success: false, mode: 'Stopped' };
   const { doc: rootDoc, scope: d } = resolveQuizDocAndScope(targetScope || doc);
+  const identity = suggestion ? captureSuggestionIdentity(d) : null;
+  let approved = false, declined = false;
+  const mayApply = !suggestion ? undefined : async answer => {
+    if (declined || approved) return false;
+    approved = await requestSuggestionApproval(d, identity, answer, shouldContinue);
+    declined = !approved;
+    return approved;
+  };
+  const mayContinue = suggestion ? () => shouldContinue() && !declined && d.isConnected && captureSuggestionIdentity(d) === identity : shouldContinue;
   const config = await new Promise(r => chrome.storage.local.get([
     'solverEngine',
     'aiProvider',
@@ -3284,7 +3358,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
     if (engine !== 'direct_ai' && !CLOUD_BACKEND_READY) {
       logAgentActivity(`[Soal ${qNum}] Kamus Mini Cloud masih Coming Soon -> dialihkan ke Direct AI.`);
     }
-    return await solveWithDirectAI(qNum, questionText, options, config, d, { shouldContinue });
+    return await solveWithDirectAI(qNum, questionText, options, config, d, { shouldContinue: mayContinue, mayApply });
   }
 
   // JIKA MENGGUNAKAN KAMUS MINI CLOUD (mylms.melvino.online)
@@ -3302,7 +3376,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
   }
   
   const sourceCtx = globalThis.KamusQuestionLogs?.context(questionType, Boolean(d.querySelector('.answer input[type="checkbox"]')), extractExpectedMultiChoiceCount(questionText));
-  const fallbackCtx = { questionText, options, config, shouldContinue, sourceCtx };
+  const fallbackCtx = { questionText, options, config, shouldContinue: mayContinue, sourceCtx, mayApply };
 
   // 0. Cek Awal: Deteksi Gambar -> Langsung Fallback 2 (Math Mode / Direct AI Vision fallback)
   if (checkForImageTags(d)) {
@@ -3317,11 +3391,14 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
 
   const tryApplyCloudResponse = async (res, data, modeLabel, attemptLabel) => {
     if (!shouldContinue()) return null;
-    if ((res && !res.ok) || !data || data.aiQuotaExceeded || (!data.answer && !data.choice) || Number(data.matchScore || 0) < threshold) {
+    if (!KamusMiniCloud.isAcceptableAnswer(res, data, threshold)) {
       return null;
     }
     globalThis.KamusQuestionLogs?.answer(data);
-    const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, threshold, d, shouldContinue);
+    const answer = { choice: data.choice || '', answer: data.answer || '' };
+    if (mayApply && !await mayApply(answer)) return { success: false, mode: 'Suggestion closed' };
+    const match = await applyAnswerToQuizDom(answer, threshold, d, mayContinue);
+    if (suggestion && !match.success) return { success: false, mode: 'Suggestion could not be applied' };
     if (!match.success) return null;
 
     const matchedCount = match.count || 1;
@@ -3329,7 +3406,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
       expectedMultiCount >= 2 ? matchedCount < expectedMultiCount : matchedCount === 1
     );
 
-    if (isIncompleteMulti) {
+    if (isIncompleteMulti && !suggestion) {
       if (hasDirectAiFallback) {
         logAgentActivity(`⚠️ [Soal ${qNum}] Cloud (${attemptLabel}) hanya mengembalikan ${matchedCount} dari ${expectedMultiCount || 'beberapa'} jawaban checkbox. Menyempurnakan via Direct AI...`);
         const aiRefined = await solveWithDirectAI(qNum, questionText, options, config, d, { resetCheckboxesFirst: true, shouldContinue });
@@ -3341,7 +3418,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
       }
     }
 
-    logAgentActivity(`[Soal ${qNum}] ${attemptLabel} Sukses! Skor: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+    logAgentActivity(`[Soal ${qNum}] ${attemptLabel} Sukses! ${data.source === 'AI_FALLBACK' ? 'Jawaban AI belum diverifikasi.' : `Kemiripan bank ${(Number(data.similarityScore ?? data.matchScore ?? 0) * 100).toFixed(0)}%.`} Jawaban: ${data.answer || data.choice}`);
     return { success: true, mode: modeLabel, score: data.matchScore };
   };
 
@@ -3356,6 +3433,9 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
       options: null, // Attempt 1: teks soal saja
       modelId: config.selectedModelId || null
     });
+    if (!shouldContinue()) return { success: false, mode: 'Stopped' };
+    const unavailable = reportCloudAiUnavailable(qNum, res, data, limit);
+    if (unavailable) return unavailable;
     if (limit || data?.aiQuotaExceeded) {
       const waitSec = limit?.retryAfterSeconds || '?';
       const reason = limit?.reasonCode || 'QUOTA';
@@ -3364,6 +3444,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
     const applied = await tryApplyCloudResponse(res, data, 'Cloud Fast Text', 'Attempt 1');
     if (applied) return applied;
   } catch (err) {
+    if (err.aiUnavailable && shouldContinue()) return reportCloudAiUnavailable(qNum, null, { aiUnavailable: true, message: err.message });
     console.warn(`[Soal ${qNum}] Attempt 1 mengalami error:`, err);
   }
 
@@ -3377,6 +3458,9 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
       options: options, context: sourceCtx, sourceOptions: options,
       modelId: config.selectedModelId || null
     });
+    if (!shouldContinue()) return { success: false, mode: 'Stopped' };
+    const unavailable = reportCloudAiUnavailable(qNum, res, data, limit);
+    if (unavailable) return unavailable;
     if (limit || data?.aiQuotaExceeded) {
       const waitSec = limit?.retryAfterSeconds || '?';
       const reason = limit?.reasonCode || 'QUOTA';
@@ -3385,6 +3469,7 @@ async function solveQuestionFlow(qNum, doc, targetScope = null, shouldContinue =
     const applied = await tryApplyCloudResponse(res, data, 'Cloud Refined Text', 'Fallback 1');
     if (applied) return applied;
   } catch (err) {
+    if (err.aiUnavailable && shouldContinue()) return reportCloudAiUnavailable(qNum, null, { aiUnavailable: true, message: err.message });
     console.warn(`[Soal ${qNum}] Fallback 1 mengalami error:`, err);
   }
 
@@ -3430,6 +3515,9 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc, fallbackC
       imageBlob, filename: `question_${qNum}.png`, modelId: selectedId,
       imageProcessingMode, questionText, options, questionType, isMultiChoice, expectedCount, context: fallbackCtx?.sourceCtx
     });
+    if (!shouldContinue()) return { success: false, mode: 'Stopped' };
+    const unavailable = reportCloudAiUnavailable(qNum, res, data, limit);
+    if (unavailable) return unavailable;
     if (limit || data?.aiQuotaExceeded) {
       const waitSec = limit?.retryAfterSeconds || '?';
       const reason = limit?.reasonCode || 'QUOTA';
@@ -3443,15 +3531,19 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc, fallbackC
     if (cloudVision && (!res?.ok || limit || data?.aiQuotaExceeded || data?.imageProcessingMode !== 'vision_first')) {
       throw new Error(data?.message || data?.error || limit?.message || 'Server belum menjalankan Mode Cepat Cloud. Perbarui backend atau pilih OCR dahulu.');
     }
-    const isValidSuccess = Boolean(res && res.ok && !limit && !data?.aiQuotaExceeded);
+    const isValidSuccess = !limit && KamusMiniCloud.isAcceptableAnswer(res, data, threshold);
     if (isValidSuccess && data && (data.answer || data.choice)) {
-      const match = await applyAnswerToQuizDom({ choice: data.choice || '', answer: data.answer || '' }, 0.60, d, shouldContinue);
+      const answer = { choice: data.choice || '', answer: data.answer || '' };
+      if (fallbackCtx?.mayApply && !await fallbackCtx.mayApply(answer)) return { success: false, mode: 'Suggestion closed' };
+      const match = await applyAnswerToQuizDom(answer, 0.60, d, shouldContinue);
+      if (fallbackCtx?.mayApply && !match.success) return { success: false, mode: 'Suggestion could not be applied' };
       if (match.success) {
-        logAgentActivity(`[Soal ${qNum}] ${cloudVision ? 'Cloud Vision Cepat' : 'Cloud OCR'} Sukses! Skor Match: ${(Number(data.matchScore || 0) * 100).toFixed(0)}%. Jawaban: ${data.answer || data.choice}`);
+        logAgentActivity(`[Soal ${qNum}] ${cloudVision ? 'Cloud Vision Cepat' : 'Cloud OCR'} Sukses! ${data.source === 'AI_FALLBACK' ? 'Jawaban AI belum diverifikasi.' : `Kemiripan bank ${(Number(data.similarityScore ?? data.matchScore ?? 0) * 100).toFixed(0)}%.`} Jawaban: ${data.answer || data.choice}`);
         return { success: true, mode: cloudVision ? 'Cloud AI Vision' : 'Cloud Math OCR', score: data.matchScore };
       }
     }
   } catch (err) {
+    if (err.aiUnavailable && shouldContinue()) return reportCloudAiUnavailable(qNum, null, { aiUnavailable: true, message: err.message });
     logAgentActivity(`❌ [Soal ${qNum}] Fallback 2 Cloud Gagal: ${err.message}`);
     console.error(`[Soal ${qNum}] Fallback 2 mengalami error:`, err);
     if (cloudVision) return { success: false, mode: 'Cloud Vision Failed', error: err.message };
@@ -3466,6 +3558,7 @@ async function executeFallback2(qNum, baseUrl, apiKey, threshold, doc, fallbackC
     logAgentActivity(`⚠️ [Soal ${qNum}] Cloud Image tidak memberi jawaban valid. Mengalihkan otomatis ke Direct AI Vision...`);
     return await solveWithDirectAI(qNum, fallbackCtx.questionText || scrapeQuestionText(d), fallbackCtx.options || scrapeOptionsText(d), cfg, d, {
       shouldContinue,
+      mayApply: fallbackCtx.mayApply,
       preCapturedBlob: imageBlob || null
     });
   }
@@ -3707,6 +3800,9 @@ async function startAgentLoop() {
       return;
     }
 
+    const mode = await new Promise(resolve => chrome.storage.local.get(['navigationMode'], resolve));
+    if (!shouldContinue()) return;
+    const suggestion = mode.navigationMode === 'suggestion';
     const pageIdentity = getCurrentQuestionIdentity(doc);
     lastSolvedQuestionKey = pageIdentity.questionKey;
 
@@ -3732,7 +3828,7 @@ async function startAgentLoop() {
       const questionStartedAt = Date.now();
       const questionLogIdentity = globalThis.KamusQuestionLogs?.begin(qNum, itemKey);
       let result;
-      try { result = await solveQuestionFlow(qNum, doc, queScope, shouldContinue); }
+      try { result = await solveQuestionFlow(qNum, doc, queScope, shouldContinue, suggestion); }
       catch (error) { result = { success:false, mode:'Error', error:error.message }; }
       logDebugEvent('SOLVER', result?.success ? 'SUCCESS' : 'WARN', `Total pengerjaan soal #${qNum}: ${((Date.now() - questionStartedAt) / 1000).toFixed(1)} detik`, {
         qNum, totalDurationMs: Date.now() - questionStartedAt, mode: result?.mode, success: Boolean(result?.success)
@@ -3741,7 +3837,7 @@ async function startAgentLoop() {
       if (!shouldContinue()) return;
       if (!result?.success) {
         logAgentActivity(`[Soal ${qNum}] Gagal dijawab: ${result?.error || result?.mode || 'Tidak ada jawaban valid'}. Agen berhenti; tekan Start untuk mencoba lagi.`);
-        showToast("", `Gagal · #${qNum}`, 'warning');
+        showToast("", result?.aiUnavailable ? result.error : `Gagal · #${qNum}`, result?.aiUnavailable ? 'error' : 'warning');
         isAgentRunning = false;
         clearPendingAgentTimer();
         setAgentState({ agentState: { status: 'idle', message: result?.error || `Gagal menjawab soal #${qNum}` } });
@@ -3750,6 +3846,12 @@ async function startAgentLoop() {
       solvedQuestionKeys.add(itemKey);
 
       if (!shouldContinue()) return;
+      if (suggestion) {
+        isAgentRunning = false;
+        clearPendingAgentTimer();
+        setAgentState({ agentState: { status: 'idle' } });
+        return;
+      }
       if (i < pendingQuestions.length - 1) {
         await new Promise(r => setTimeout(r, 350));
       }

@@ -11,6 +11,36 @@ const section = (start, end) => {
   return content.slice(a, b);
 };
 const noop = () => {};
+function cloudSdk() { const sdk = context({}); sdk.self = sdk; vm.runInContext(source('ai-cloud-client.js'), sdk); return sdk.KamusMiniCloud; }
+
+test('Cloud v3 treats identity and moderation failures as terminal account restrictions', async () => {
+  const c = context({}); c.self = c;
+  vm.runInContext(source('ai-cloud-client.js'), c);
+  assert.equal(c.KamusMiniCloud.CLIENT_VERSION, '3');
+  for (const reasonCode of ['PROFILE_REQUIRED', 'IDENTITY_REVIEW_PENDING', 'ACCOUNT_SUSPENDED', 'ACCOUNT_BANNED']) {
+    const result = c.KamusMiniCloud.parseLimitError({status:403, headers:{get:()=>null}}, {reasonCode, message:'Periksa akun', aiUnavailable:false});
+    assert.equal(result.isAccessRestricted, true);
+    assert.equal(result.isUnavailable, false);
+    assert.equal(result.isLimit, false);
+    assert.equal(result.reasonCode, reasonCode);
+  }
+  let notifications = 0, stopped = false;
+  const flow = context({ isAgentRunning:true, logAgentActivity:noop, showToast:()=>notifications++, setAgentState:()=>{stopped=true;} });
+  vm.runInContext(section('function reportCloudAiUnavailable(', 'async function solveQuestionFlow('), flow);
+  const result = flow.reportCloudAiUnavailable(1, {status:403}, {reasonCode:'PROFILE_REQUIRED', message:'Lengkapi identitas'}, {isAccessRestricted:true});
+  assert.equal(result.success, false);
+  assert.equal(result.mode, 'Account Access Restricted');
+  assert.equal(flow.isAgentRunning, false);
+  assert.equal(stopped, true);
+  assert.equal(notifications, 1);
+  assert.equal(c.KamusMiniCloud.isAcceptableAnswer({ok:true}, {source:'AI_FALLBACK', answerOrigin:'AI', answer:'Synthetic answer', matchScore:0, similarityScore:null, verificationStatus:'AI_UNVERIFIED'}, .75), true);
+  assert.equal(c.KamusMiniCloud.isAcceptableAnswer({ok:true}, {source:'DATABASE', answer:'Synthetic answer', matchScore:.99, similarityScore:.70}, .75), false);
+  const cancelled = c.KamusMiniCloud.parseLimitError({status:409,headers:{get:()=>null}}, {reasonCode:'REQUEST_CANCELLED'});
+  assert.equal(cancelled.isCancelled, true); assert.equal(cancelled.isUnavailable, false); assert.equal(cancelled.isLimit, false);
+  flow.isAgentRunning = true;
+  assert.equal(flow.reportCloudAiUnavailable(1, {status:409}, {reasonCode:'REQUEST_CANCELLED'}, cancelled).mode, 'Cancelled');
+  assert.equal(flow.isAgentRunning, true);
+});
 function context(extra) { return vm.createContext({ console, setTimeout, clearTimeout, logDebugEvent: noop, ...extra }); }
 async function capture(activeId, duringCapture = noop) {
   let listener, activated, removed = false, captures = 0;
@@ -111,6 +141,46 @@ test('successful question is marked solved', async () => {
   assert.equal(c.solvedQuestionKeys.has('q1'), true); assert.match(toast, /Dipilih/);
 });
 
+test('suggestion waits for a trusted click and refuses to apply after the question changes', async () => {
+  const elements = [];
+  const doc = { URL: 'https://quiz.example.test', body: { appendChild: noop }, createElement(tag) {
+    const el = { tag, style: {}, events: {}, setAttribute: noop, append: noop, remove: noop, addEventListener(name, callback) { this.events[name] = callback; } };
+    elements.push(el);
+    return el;
+  } };
+  const scope = { ownerDocument: doc, isConnected: true, querySelectorAll: () => [] };
+  let question = 'Question A';
+  const c = context({ setInterval, clearInterval, getQuestionIdentityFromElement: () => ({ questionKey: 'q1' }), detectQuizInputType: () => 'choice', scrapeOptionsText: () => ['one', 'two'], scrapeQuestionText: () => question });
+  vm.runInContext(section('function captureSuggestionIdentity(', 'async function solveQuestionFlow('), c);
+  const identity = c.captureSuggestionIdentity(scope);
+  let settled = false;
+  const first = c.requestSuggestionApproval(scope, identity, { choice: 'A' }, () => true).then(result => { settled = true; return result; });
+  elements.find(element => element.textContent === 'Terapkan ke soal ini').events.click({ isTrusted: false });
+  await Promise.resolve();
+  assert.equal(settled, false);
+  question = 'Question B';
+  elements.find(element => element.textContent === 'Terapkan ke soal ini').events.click({ isTrusted: true });
+  assert.equal(await first, false);
+  elements.length = 0;
+  const second = c.requestSuggestionApproval(scope, c.captureSuggestionIdentity(scope), { choice: 'B' }, () => true);
+  elements.find(element => element.textContent === 'Terapkan ke soal ini').events.click({ isTrusted: true });
+  assert.equal(await second, true);
+});
+
+test('suggestion mode processes one question and never enters automatic navigation', async () => {
+  const doc = { querySelector: () => ({}) }; let requests = 0, nav = 0, state;
+  const c = context({ isAgentRunning: true, isSolvingActive: false, agentGeneration: 1, isExtensionValid: () => true, isManagedByTopFrame: () => false,
+    getQuizDocument: () => doc, handleProactiveCaptchaCheck: () => false, getPageQuestions: () => [doc, doc], solvedQuestionKeys: new Set(),
+    getQuestionIdentityFromElement: () => ({ qNum: '1', questionKey: 'q1' }), getCurrentQuestionIdentity: () => ({ questionKey: 'q1' }),
+    showToast: noop, solveQuestionFlow: async (_num, _doc, _scope, _continue, suggestion) => { assert.equal(suggestion, true); requests++; return { success: true }; },
+    clearPendingAgentTimer: noop, setAgentState: patch => { state = patch.agentState; }, attachNextButtonSniffer: () => { nav++; },
+    findQuizNavigationTarget: () => { nav++; }, chrome: { storage: { local: { get: (_keys, cb) => cb({ navigationMode: 'suggestion' }) } } },
+    logAgentActivity: noop });
+  vm.runInContext(section('async function startAgentLoop()', '// ACTIVE HEARTBEAT'), c);
+  await c.startAgentLoop();
+  assert.equal(requests, 1); assert.equal(nav, 0); assert.equal(state.status, 'idle');
+});
+
 test('answer application refuses cancelled cloud or direct run before reading DOM', async () => {
   const c = context({ isAgentRunning: false });
   vm.runInContext(section('async function applyAnswerToQuizDom(', '// ---- HELPER: CONVERT BLOB'), c);
@@ -208,7 +278,7 @@ test('text-only provider keeps OCR path even when speed is selected', async () =
   assert.equal(result.success, true); assert.equal(stats.cacheReads, 1); assert.equal(stats.captures, 0);
 });
 
-function cloudSolverContext(response = { res: {ok: true}, body: {choice: 'A, C', answer: 'Two answers', imageProcessingMode: 'vision_first', timings: {ocrMs: 0, databaseMs: 0, aiMs: 15, totalMs: 20}} }) {
+function cloudSolverContext(response = { res: {ok: true}, body: {source:'AI_FALLBACK', answerOrigin:'AI', choice: 'A, C', answer: 'Two answers', imageProcessingMode: 'vision_first', timings: {ocrMs: 0, databaseMs: 0, aiMs: 15, totalMs: 20}} }) {
   const requests = [], applications = [], scopes = [], logs = [];
   let directCalls = 0;
   const c = context({
@@ -217,11 +287,12 @@ function cloudSolverContext(response = { res: {ok: true}, body: {choice: 'A, C',
     detectQuizInputType: scope => scope.kind,
     scrapeQuestionText: () => 'Choose two', scrapeOptionsText: () => ['A. One', 'B. Two', 'C. Three'], extractExpectedMultiChoiceCount: () => 2,
     captureFormulationElement: async scope => { scopes.push(scope); return {type: 'image/png'}; },
-    KamusMiniCloud: {searchAnswerImage: async (key, args) => {requests.push(args); return response}},
+    KamusMiniCloud: {...cloudSdk(), searchAnswerImage: async (key, args) => {requests.push(args); return response}},
     applyAnswerToQuizDom: async (answer, threshold, scope, shouldContinue) => { if (!shouldContinue()) return {success:false}; applications.push({answer, scope}); return {success: true}; },
-    logAgentActivity: msg => logs.push(msg), logDebugEvent: noop,
+    logAgentActivity: msg => logs.push(msg), logDebugEvent: noop, showToast: noop,
     solveWithDirectAI: async () => {directCalls++; return {success:true}},
   });
+  vm.runInContext(section('function reportCloudAiUnavailable(', 'async function solveQuestionFlow('), c);
   vm.runInContext(section('async function executeFallback2(', '// ---- QUIZ NAVIGATION HELPERS'), c);
   const scope = {kind:'choice', querySelector: () => ({})};
   const run = (config = {}, target = scope) => c.executeFallback2('2','https://server.invalid','dummy',0.7,target,{config, questionText:'Choose two',options:['A. One','B. Two','C. Three'],shouldContinue:()=>c.isAgentRunning});
@@ -250,7 +321,7 @@ test('Cloud speed never falls back to Direct AI or OCR on error or old-server re
   }
 });
 test('Cloud OCR-first toggle sends legacy processing mode', async () => {
-  const f=cloudSolverContext({res:{ok:true},body:{answer:'One',choice:'A',imageProcessingMode:'ocr_first'}});
+  const f=cloudSolverContext({res:{ok:true},body:{answer:'One',choice:'A',source:'DATABASE',similarityScore:.95,imageProcessingMode:'ocr_first'}});
   const result=await f.run({imageProcessingMode:'ocr_first'});
   assert.equal(f.requests[0].imageProcessingMode,'ocr_first'); assert.equal(result.mode,'Cloud Math OCR');
 });
@@ -261,6 +332,72 @@ test('Cloud client serializes the mode and question context into multipart field
   await c.KamusMiniCloud.searchAnswerImage('dummy',{imageBlob:new Blob(['image']),modelId:'model',imageProcessingMode:'vision_first',questionText:'Question',options:['A. One'],questionType:'essay',isMultiChoice:false},async (url,init)=>{fd=init.body;return {ok:true,status:200,json:async()=>({answer:'Answer'})}});
   assert.equal(fd.get('imageProcessingMode'),'vision_first'); assert.equal(fd.get('questionType'),'essay');
   assert.deepEqual(JSON.parse(fd.get('options')),['A. One']); assert.equal(fd.get('isMultiChoice'),'false');
+});
+
+test('Cloud errors distinguish unavailable from throttling and preserve quick-search messages', async () => {
+  const c = context({}); c.self = c;
+  vm.runInContext(source('ai-cloud-client.js'), c);
+  const parse = c.KamusMiniCloud.parseLimitError;
+  const unavailable = parse({status:503, headers:{get:()=>null}}, null);
+  assert.equal(unavailable.isUnavailable, true);
+  assert.equal(unavailable.retryAfterSeconds, null);
+  assert.match(unavailable.message, /AI sedang tidak tersedia/);
+  assert.doesNotMatch(unavailable.message, /limit|kuota/i);
+  const quick = parse({status:503}, {jawaban:'Layanan AI sedang tidak tersedia.'});
+  assert.equal(quick.message, 'Layanan AI sedang tidak tersedia.');
+  const legacy = parse({status:404}, {reasonCode:'PROVIDER_UNAVAILABLE', answer:'AI unavailable'});
+  assert.equal(legacy.isUnavailable, true);
+  const limited = parse({status:429, headers:{get:()=> '60'}}, {reasonCode:'PROVIDER_RATE_LIMIT', message:'Provider sedang membatasi permintaan.'});
+  assert.equal(limited.isUnavailable, false);
+  assert.equal(limited.retryAfterSeconds, 60);
+  assert.equal(limited.message, 'Provider sedang membatasi permintaan.');
+  assert.equal(parse({status:404}, {answer:'Tidak ada kecocokan'}), null);
+  await assert.rejects(c.KamusMiniCloud.searchAnswer('key', {query:'Question'}, async()=>{throw new TypeError('Failed to fetch')}), error => error.aiUnavailable && /tidak dapat dihubungi/.test(error.message));
+});
+
+test('Cloud text flow stops and notifies immediately after either AI fallback fails', async () => {
+  for (const failureAt of [1, 2]) {
+    for (const network of [false, true]) {
+      const calls = [], toasts = [], logs = [];
+      let imageCalls = 0, directCalls = 0, applications = 0;
+      const scope = {querySelector:()=>null};
+      const c = context({
+        isAgentRunning:true, document:{}, CLOUD_BACKEND_READY:true, KAMUS_MINI_CLOUD_URL:'https://cloud.invalid',
+        chrome:{storage:{local:{get:(_keys, cb)=>cb({solverEngine:'cloud', apiKey:'key', aiApiKey:'configured', aiProvider:'custom'})}}},
+        resolveQuizDocAndScope:()=>({doc:scope,scope}), detectQuizInputType:()=> 'choice',
+        scrapeQuestionText:()=> 'A fixture question?', scrapeOptionsText:()=> ['One','Two'],
+        findQuizContextInRoot:()=>null, inspectFormulationImages:()=>({}), checkForImageTags:()=>false,
+        logDebugEvent:noop, logAgentActivity:msg=>logs.push(msg), showToast:(_title,msg)=>toasts.push(msg),
+        solveWithDirectAI:async()=>{directCalls++;return {success:true}},
+        applyAnswerToQuizDom:async()=>{applications++;return {success:true}},
+        KamusMiniCloud:{...cloudSdk(), searchAnswer:async(_key,args)=>{
+          calls.push(args);
+          if (calls.length < failureAt) return {res:{ok:false,status:404},body:{matchScore:0,answer:'Tidak ada kecocokan'}};
+          if (network) {const error=new Error('Layanan AI Cloud tidak dapat dihubungi.');error.aiUnavailable=true;throw error;}
+          return {res:{ok:false,status:503},body:{aiUnavailable:true,reasonCode:'PROVIDER_UNAVAILABLE',message:'Layanan AI sedang tidak tersedia.',answer:'Layanan AI sedang tidak tersedia.'}};
+        }},
+      });
+      vm.runInContext(section('function reportCloudAiUnavailable(', '// Asynchronous execution of Fallback 2'), c);
+      c.executeFallback2=async()=>{imageCalls++;return {success:true}};
+      const result = await c.solveQuestionFlow('1', scope);
+      assert.equal(result.success,false); assert.equal(result.aiUnavailable,true);
+      assert.equal(calls.length,failureAt); assert.equal(imageCalls,0); assert.equal(directCalls,0); assert.equal(applications,0);
+      assert.match(toasts[0], /Layanan AI/);
+      assert.ok(logs.some(msg=>msg.includes(toasts[0])));
+      assert.ok(logs.every(msg=>!msg.includes('AI dilimit')));
+    }
+  }
+});
+
+test('Cloud image outage stops both modes before answer application or Direct AI fallback', async () => {
+  for (const mode of ['vision_first','ocr_first']) {
+    const f=cloudSolverContext({res:{ok:false,status:503},body:{aiUnavailable:true,reasonCode:'PROVIDER_UNAVAILABLE',message:'Layanan AI sedang tidak tersedia.'}});
+    const result=await f.run({imageProcessingMode:mode,aiProvider:'custom',aiApiKey:'configured'});
+    assert.equal(result.success,false); assert.equal(result.aiUnavailable,true);
+    assert.equal(f.requests.length,1); assert.equal(f.applications.length,0); assert.equal(f.directCalls(),0);
+    assert.match(result.error,/AI sedang tidak tersedia/);
+    assert.ok(f.logs.every(msg=>!msg.includes('AI Cloud dilimit')));
+  }
 });
 
 

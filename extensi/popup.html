@@ -180,7 +180,9 @@
       line-height: 1.4;
       word-break: break-word;
     }
-  </style>
+    .identity-reminder:not([hidden]) { border: 1px solid currentColor; border-radius: 8px; margin: 8px 0; padding: 8px; }
+  .identity-reminder p { margin: 0 0 4px; font-size: 12px; }
+</style>
 </head>
 <body>
   <!-- Header -->
@@ -222,10 +224,16 @@
     <span id="statusLabel" class="status-text tabular">Siap</span>
   </div>
 
+  <section id="cloudIdentityReminder" class="identity-reminder" aria-label="Pengingat identitas siswa" hidden>
+    <p id="cloudIdentityText" role="status"></p>
+    <a href="https://mylms.melvino.online/profile/academic" target="_blank" rel="noopener noreferrer">Periksa identitas</a>
+  </section>
+
   <!-- Navigation Mode -->
   <div class="control-row">
     <span class="control-label">Mode Navigasi</span>
     <div class="segmented" id="segNavMode" role="radiogroup" aria-label="Mode Navigasi">
+      <button type="button" id="btnModeSuggestion" class="segmented__btn" role="radio" aria-checked="false" data-mode="suggestion" title="Tampilkan saran dan tunggu klik sebelum mengisi soal">Saran</button>
       <button type="button" id="btnModeSemi" class="segmented__btn active" role="radio" aria-checked="true" data-mode="semi_auto">Semi</button>
       <button type="button" id="btnModeAuto" class="segmented__btn" role="radio" aria-checked="false" data-mode="full_auto">Auto</button>
     </div>

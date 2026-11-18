@@ -531,50 +531,57 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  // Test Kamus Mini Cloud Connection
   if (btnTestCloudConnection && cloudTestFeedback) {
+    const profileLink = document.getElementById('cloudDiagnosticProfileLink');
+    const dateFormat = new Intl.DateTimeFormat('id-ID', { timeZone: 'Asia/Jakarta', dateStyle: 'medium', timeStyle: 'short' });
     btnTestCloudConnection.addEventListener('click', async () => {
-      const apiKey = backendApiKeyInput ? backendApiKeyInput.value.trim() : '';
+      const apiKey = backendApiKeyInput?.value.trim();
+      cloudTestFeedback.style.display = 'block';
+      profileLink.hidden = true;
       if (!apiKey) {
         cloudTestFeedback.className = 'test-feedback error';
-        cloudTestFeedback.textContent = 'Masukkan x-api-key Kamus Mini Cloud terlebih dahulu.';
-        cloudTestFeedback.style.display = 'block';
+        cloudTestFeedback.textContent = 'Masukkan API key Kamus Mini Cloud terlebih dahulu.';
         return;
       }
 
       cloudTestFeedback.className = 'test-feedback';
-      cloudTestFeedback.textContent = `Menghubungi ${CLOUD_ENDPOINT}/api/v1/agent/categories...`;
-      cloudTestFeedback.style.display = 'block';
+      cloudTestFeedback.textContent = 'Memeriksa koneksi, akses akun, dan model Cloud…';
       btnTestCloudConnection.disabled = true;
-
       try {
-        const res = await fetch(`${CLOUD_ENDPOINT}/api/v1/agent/categories`, {
-          method: 'GET',
-          headers: { 'x-api-key': apiKey }
-        });
-
-        let data = null;
-        try {
-          data = await res.json();
-        } catch (_) {
-          data = null;
+        const fetchWithTimeout = (url, init) => fetch(url, { ...init, signal: AbortSignal.timeout(8000) });
+        const result = await KamusMiniCloud.diagnose(apiKey, fetchWithTimeout);
+        const version = chrome.runtime.getManifest().version;
+        const header = `Ekstensi v${version} · kontrak Cloud v${KamusMiniCloud.CLIENT_VERSION}.`;
+        if (!result.profile) {
+          const detail = result.status === 404 ? 'Server belum menyediakan diagnostik akun.' : result.limit?.message || 'Pemeriksaan akun belum dapat dijalankan.';
+          cloudTestFeedback.className = 'test-feedback error';
+          cloudTestFeedback.textContent = `${header} Server merespons (HTTP ${result.status}). ${detail}`;
+          return;
         }
 
-        if (!res.ok) {
-          const msg = data?.error || data?.message || `HTTP Error ${res.status}`;
-          throw new Error(msg);
-        }
-
-        if (data && data.success === false) {
-          throw new Error(data.error || 'Autentikasi Cloud gagal.');
-        }
-
-        const catCount = Array.isArray(data?.data) ? data.data.length : 0;
-        cloudTestFeedback.className = 'test-feedback success';
-        cloudTestFeedback.textContent = `Terhubung ke Kamus Mini Cloud (${catCount} kategori soal tersedia).`;
-      } catch (err) {
+        const { profile, catalog } = result;
+        const verified = ['VERIFIED', 'ADMIN'].includes(profile.status);
+        const reminders = {
+          PENDING: 'Pengajuan identitas sedang menunggu pengesahan admin.',
+          REQUIRED: 'Lengkapi identitas sekolah melalui dashboard.',
+          REJECTED: 'Periksa keputusan admin dan ajukan kembali identitas melalui dashboard.',
+        };
+        const identity = !profile.policyActive ? 'Kebijakan identitas belum aktif.'
+          : verified ? (profile.status === 'ADMIN' ? 'Akun admin aktif.' : 'Identitas siswa terverifikasi.')
+          : reminders[profile.status] || 'Periksa identitas melalui dashboard.';
+        const deadline = new Date(profile.graceEndsAt ?? '');
+        const grace = Number.isNaN(deadline.getTime()) ? '' : ` Masa tenggang sampai ${dateFormat.format(deadline)} WIB.`;
+        const selected = catalog?.models?.find(model => model.id === catalog.selectedModelId);
+        const model = selected ? `Model: ${selected.displayName}.`
+          : catalog?.models?.length ? 'Model Cloud tersedia. Pilih model di pengaturan.'
+          : 'Periksa konfigurasi model Cloud dengan admin.';
+        const compatible = profile.contractVersion === Number(KamusMiniCloud.CLIENT_VERSION);
+        cloudTestFeedback.className = `test-feedback ${profile.access?.allowed && compatible ? 'success' : 'error'}`;
+        cloudTestFeedback.textContent = `${header} Koneksi dan API key valid. ${identity}${grace} ${profile.access?.allowed ? 'Akses Cloud aktif.' : 'Akses Cloud dibatasi.'} ${model}${compatible ? '' : ' Versi kontrak server berbeda.'}`;
+        profileLink.hidden = !profile.policyActive || verified;
+      } catch (error) {
         cloudTestFeedback.className = 'test-feedback error';
-        cloudTestFeedback.textContent = `Koneksi Cloud Gagal: ${err.message}`;
+        cloudTestFeedback.textContent = error.aiUnavailable ? 'Server Cloud tidak dapat dihubungi. Periksa koneksi lalu coba lagi.' : 'Diagnostik gagal dijalankan. Coba lagi.';
       } finally {
         btnTestCloudConnection.disabled = false;
       }

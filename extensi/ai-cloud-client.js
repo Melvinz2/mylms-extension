@@ -1,35 +1,44 @@
 // ======================================================
-// KAMUS MINI CLOUD CLIENT (v2) — single source of truth
+// KAMUS MINI CLOUD CLIENT (v3) — single source of truth
 // Semua fetch ke mylms.melvino.online lewat sini:
-// otomatis header X-AI-Client-Version: 2 + modelId + parser limit.
+// otomatis header X-AI-Client-Version: 3 + modelId + parser limit.
 // ======================================================
 (function (global) {
   'use strict';
 
   const CLOUD_URL = 'https://mylms.melvino.online';
-  const CLIENT_VERSION = '2';
+  const CLIENT_VERSION = '3';
 
   // Normalisasi error limit dari response 429/503 menjadi objek terstruktur.
   // Return null kalau bukan error limit.
   function parseLimitError(res, body) {
-    if (res.status !== 429 && res.status !== 503) return null;
+    const isCancelled = body?.reasonCode === 'REQUEST_CANCELLED';
+    const isAccessRestricted = [401, 403].includes(res.status) || ['PROFILE_REQUIRED', 'IDENTITY_REVIEW_PENDING'].includes(body?.reasonCode) || String(body?.reasonCode || '').startsWith('ACCOUNT_');
+    const isUnavailable = res.status === 503 || body?.aiUnavailable === true ||
+      ['PROVIDER_UNAVAILABLE', 'MODEL_UNAVAILABLE', 'AI_DISABLED'].includes(body?.reasonCode);
+    if (res.status !== 429 && !isUnavailable && !isAccessRestricted && !isCancelled) return null;
     const reasonCode = (body && body.reasonCode) ||
-      (res.status === 429 ? 'RATE_LIMIT' : 'PROVIDER_UNAVAILABLE');
+      (isAccessRestricted ? 'ACCOUNT_ACCESS_RESTRICTED' : res.status === 429 ? 'RATE_LIMIT' : 'PROVIDER_UNAVAILABLE');
     let retryAfterSeconds = Number(body && body.retryAfterSeconds);
     if (!Number.isFinite(retryAfterSeconds) || retryAfterSeconds <= 0) {
       const h = Number(res.headers && res.headers.get('Retry-After'));
-      retryAfterSeconds = Number.isFinite(h) ? h : (res.status === 429 ? 10 : 30);
+      retryAfterSeconds = Number.isFinite(h) && h > 0 ? h : (isUnavailable ? null : 10);
     }
     return {
-      isLimit: true,
+      isLimit: !isAccessRestricted && !isCancelled,
+      isCancelled,
+      isAccessRestricted,
+      profilePath: body?.profilePath || null,
+      isUnavailable,
       reasonCode,
       retryAfterSeconds,
-      message: (body && (body.answer || body.message)) || 'Batas AI tercapai.',
+      message: (body && (body.message || body.jawaban || body.answer || body.error)) ||
+        (isCancelled ? 'Permintaan AI dibatalkan. Ulangi soal ini secara manual.' : isAccessRestricted ? 'Akses Cloud dibatasi. Periksa identitas akun atau hubungi admin sekolah.' : isUnavailable ? 'Layanan AI sedang tidak tersedia. Silakan coba lagi nanti.' : 'Batas AI tercapai.'),
       httpStatus: res.status
     };
   }
 
-  // Wrapper safeFetch-style: kirim header v2, return { res, body, limit }.
+  // Wrapper safeFetch-style: kirim header v3, return { res, body, limit }.
   // `fetchImpl` disuntik agar bisa jalan di content script (safeFetch),
   // popup/options (fetch biasa), maupun unit test (fetch palsu).
   async function request(path, { method = 'GET', apiKey, fetchImpl, json, formData } = {}) {
@@ -48,6 +57,12 @@
     }
     let res;
     try { res = await impl(CLOUD_URL + path, init); }
+    catch (cause) {
+      const error = new Error('Layanan AI Cloud tidak dapat dihubungi. Silakan coba lagi nanti.');
+      error.aiUnavailable = true;
+      error.cause = cause;
+      throw error;
+    }
     finally {
       if (method === 'POST' && ['/api/search', '/api/v1/agent/search-answer', '/api/v1/agent/search-answer-image'].includes(path)) {
         try { global.chrome?.runtime?.sendMessage({ action: 'quotaUsageInvalidate' }, () => { void global.chrome?.runtime?.lastError; }); } catch (_) {}
@@ -57,6 +72,14 @@
     try { body = await res.json(); } catch (_) { /* body non-JSON */ }
     const limit = parseLimitError(res, body);
     return { res, body, limit };
+  }
+
+  // A similarity threshold applies only to bank matches, never to an AI confidence guess.
+  function isAcceptableAnswer(res, body, threshold = 0.75) {
+    if (!res?.ok || !body || body.success === false || body.aiUnavailable || body.aiQuotaExceeded || (!body.answer && !body.choice)) return false;
+    if (body.answerOrigin === 'AI' || body.source === 'AI_FALLBACK') return true;
+    const similarity = Number(body.similarityScore ?? body.matchScore);
+    return Number.isFinite(similarity) && similarity >= threshold;
   }
 
   // ---- API level tinggi ----
@@ -111,9 +134,18 @@
     });
   }
 
+  // Reads account status and catalog configuration without a model call.
+  async function diagnose(apiKey, fetchImpl) {
+    const profile = await request('/api/v1/me/academic-profile', { apiKey, fetchImpl });
+    if (!profile.res.ok || !profile.body?.data) return { status: profile.res.status, limit: profile.limit, profile: null };
+    const account = profile.body.data;
+    const catalog = await request('/api/v1/ai-models/available', { apiKey, fetchImpl });
+    return { status: profile.res.status, profile: account, catalog: catalog.res.ok ? catalog.body?.data : null, catalogStatus: catalog.res.status };
+  }
+
   global.KamusMiniCloud = {
     CLOUD_URL, CLIENT_VERSION,
-    parseLimitError, request,
+    parseLimitError, request, isAcceptableAnswer, diagnose,
     getAvailableModels, saveModelPreference, getMyAiUsage,
     searchAnswer, searchAnswerImage
   };

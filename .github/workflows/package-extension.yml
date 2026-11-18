@@ -8,6 +8,12 @@ on:
       - 'tests/**'
       - '.github/workflows/package-extension.yml'
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish a new immutable release for the manifest version
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -42,30 +48,55 @@ jobs:
           test -f extensi/popup.html
 
       - name: Build zip and checksum
-        id: sha
         run: |
-          cd extensi
-          ZIP="../kamus-mini-${{ steps.meta.outputs.version }}.zip"
-          zip -rq "$ZIP" . -x '.*' -x '__MACOSX/*'
-          cd ..
-          SHA=$(sha256sum "kamus-mini-${{ steps.meta.outputs.version }}.zip" | cut -d' ' -f1)
-          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
-          echo "SHA256=$SHA" >> "$GITHUB_ENV"
-          printf "%s  %s\n" "$SHA" "kamus-mini-${{ steps.meta.outputs.version }}.zip" > "kamus-mini-${{ steps.meta.outputs.version }}.zip.sha256"
+          git ls-files -z -- extensi/ | python3 -c '
+          import json, pathlib, sys, zipfile
+          version = json.loads(pathlib.Path("extensi/manifest.json").read_text())["version"]
+          tracked = sys.stdin.buffer.read().decode().rstrip(chr(0)).split(chr(0))
+          root = pathlib.Path("extensi")
+          with zipfile.ZipFile(f"kamus-mini-{version}.zip", "w", zipfile.ZIP_DEFLATED) as bundle:
+              for name in sorted(tracked):
+                  path = pathlib.Path(name)
+                  entry = path.relative_to(root)
+                  for part in entry.parts:
+                      if part.startswith((".", "Daftar_Siswa_")) or part == "private-data":
+                          raise ValueError("Private path in distribution files")
+                  if path.is_symlink():
+                      raise ValueError("Symlink in distribution files")
+                  bundle.write(path, entry.as_posix())
+          '
+          ZIP="kamus-mini-$VERSION.zip"
+          unzip -tq "$ZIP"
+          test "$(unzip -p "$ZIP" manifest.json | jq -r .version)" = "$VERSION"
+          sha256sum "$ZIP" > "$ZIP.sha256"
+          sha256sum -c "$ZIP.sha256"
 
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kamus-mini-${{ steps.meta.outputs.version }}
+          path: kamus-mini-${{ steps.meta.outputs.version }}.zip*
+
+      - name: Publish new release and verify downloads
+        if: github.event_name == 'workflow_dispatch' && inputs.publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="v$VERSION"
           ZIP="kamus-mini-$VERSION.zip"
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Release $TAG exists — uploading asset."
-            gh release upload "$TAG" "$ZIP" "$ZIP.sha256" --clobber
-          else
-            echo "Creating release $TAG"
-            gh release create "$TAG" \
-              --title "Kamus Mini $VERSION" \
-              --notes "$(printf '%s\n' '- Tracker kuota visual memakai bar untuk jatah permintaan, slot aktif, dan kuota akun Cloud.' '- Overlay kuota khusus halaman kuis dapat diaktifkan, diminimalkan, dan digeser. Posisi terakhir disimpan.' '- Popup dan overlay berbagi data penggunaan, dengan status data terakhir saat jaringan terganggu.')" \
-              "$ZIP" "$ZIP.sha256"
+            echo "Release $TAG already exists. Existing assets are preserved." >&2
+            exit 1
           fi
+          existing="$(git ls-remote --tags origin "refs/tags/$TAG")"
+          if [ -n "$existing" ]; then
+            echo "Tag $TAG already exists. Use a new manifest version." >&2
+            exit 1
+          fi
+          gh release create "$TAG" --target "$GITHUB_SHA" --title "Kamus Mini $VERSION" \
+            --notes "$(printf '%s\n' '- Mode Saran menunggu klik sebelum menerapkan jawaban ke soal yang sama.' '- Diagnostik Cloud menampilkan akses akun, identitas siswa, tenggat dan konfigurasi model tanpa memakai token.' '- Kontrak v3 membedakan hasil bank dari jawaban AI yang belum diperiksa.')" \
+            "$ZIP" "$ZIP.sha256"
+          mkdir verified-release
+          gh release download "$TAG" --dir verified-release --pattern "$ZIP" --pattern "$ZIP.sha256"
+          (cd verified-release && sha256sum -c "$ZIP.sha256" && unzip -tq "$ZIP")
+          cmp "$ZIP" "verified-release/$ZIP"
